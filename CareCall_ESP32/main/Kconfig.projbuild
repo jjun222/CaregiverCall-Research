@@ -1,0 +1,16 @@
+menu "CareCall Wi-Fi configuration"
+
+    config CARECALL_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+        help
+            ESP32-C3가 Station 모드로 연결할 2.4GHz Wi-Fi SSID입니다.
+
+    config CARECALL_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+        help
+            WPA2/WPA3 Personal 네트워크의 비밀번호입니다.
+            비밀번호가 없는 개방형 네트워크라면 비워둘 수 있습니다.
+
+endmenu
