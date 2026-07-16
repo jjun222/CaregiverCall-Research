@@ -493,6 +493,13 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# CareCall Wi-Fi configuration
+#
+CONFIG_CARECALL_WIFI_SSID="HealthcareConvergenceLab"
+CONFIG_CARECALL_WIFI_PASSWORD="Healthcare1234!"
+# end of CareCall Wi-Fi configuration
+
+#
 # Compiler options
 #
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
