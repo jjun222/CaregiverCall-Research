@@ -1,8 +1,11 @@
 #include "button_driver.h"
+#include "mqtt_manager.h"
 #include "wifi_manager.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace {
 
@@ -13,13 +16,14 @@ void on_call_button_pressed()
     ESP_LOGW(TAG, "CALL REQUEST detected");
 
     /*
-     * 현재 단계에서는 호출 버튼이 정상적으로 감지되는지만 확인합니다.
+     * 이번 단계에서는 버튼 MQTT 발행을 아직 수행하지 않습니다.
      *
-     * 이후 연결:
+     * 다음 단계:
      * call_manager_request_call()
      * -> event_id 생성
+     * -> 호출 JSON 생성
      * -> MQTT QoS 1 발행
-     * -> Raspberry Pi application ACK 대기
+     * -> Raspberry Pi Application ACK 대기
      */
 }
 
@@ -34,13 +38,10 @@ extern "C" void app_main(void)
 
     ESP_LOGI(
         TAG,
-        "Hardware profile: GPIO4 call button and Wi-Fi Station"
+        "Hardware profile: GPIO4 call button, "
+        "Wi-Fi Station and MQTT"
     );
 
-    /*
-     * 버튼을 먼저 시작합니다.
-     * Wi-Fi 연결을 시도하는 동안에도 버튼 감시는 별도 Task에서 계속됩니다.
-     */
     ESP_ERROR_CHECK(
         button_driver_init(on_call_button_pressed)
     );
@@ -50,16 +51,34 @@ extern "C" void app_main(void)
         "Call button system is ready"
     );
 
-    /*
-     * Wi-Fi 초기화는 연결 요청을 시작한 뒤 반환합니다.
-     * 실제 연결 완료 여부는 WIFI 로그의 IPv4 address로 확인합니다.
-     */
     ESP_ERROR_CHECK(
         wifi_manager_init()
     );
 
     ESP_LOGI(
         TAG,
-        "Wi-Fi Station initialization is ready"
+        "Waiting for Wi-Fi IPv4 address"
+    );
+
+    /*
+     * app_main만 기다립니다.
+     * 버튼 감시 Task는 별도로 실행되므로 버튼 동작은 계속 유지됩니다.
+     */
+    while (!wifi_manager_is_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Wi-Fi IPv4 address acquired; starting MQTT"
+    );
+
+    ESP_ERROR_CHECK(
+        mqtt_manager_init()
+    );
+
+    ESP_LOGI(
+        TAG,
+        "MQTT initialization is ready"
     );
 }
