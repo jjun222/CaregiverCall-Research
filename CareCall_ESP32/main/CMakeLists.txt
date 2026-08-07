@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.cpp"
         "button_driver.cpp"
         "wifi_manager.cpp"
+        "mqtt_manager.cpp"
 
     INCLUDE_DIRS
         "."
@@ -13,4 +14,5 @@ idf_component_register(
         esp_event
         esp_netif
         nvs_flash
+        mqtt
 )
