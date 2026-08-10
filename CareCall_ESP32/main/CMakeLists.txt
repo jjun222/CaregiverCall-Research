@@ -15,4 +15,5 @@ idf_component_register(
         esp_netif
         nvs_flash
         mqtt
+        espressif__mdns
 )
