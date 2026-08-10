@@ -1,10 +1,18 @@
 #include "mqtt_manager.h"
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif_ip_addr.h"
+#include "mdns.h"
 #include "mqtt_client.h"
 #include "sdkconfig.h"
 
@@ -17,16 +25,26 @@ constexpr char ACK_TOPIC[] =
 
 constexpr int ACK_QOS = 1;
 
+constexpr uint32_t MDNS_QUERY_TIMEOUT_MS = 2000;
+constexpr uint32_t RECONNECT_DELAY_MS = 5000;
+constexpr uint32_t EVENT_HANDLER_RETURN_DELAY_MS = 100;
+
+constexpr uint32_t MQTT_MANAGER_TASK_STACK_SIZE = 6144;
+constexpr UBaseType_t MQTT_MANAGER_TASK_PRIORITY = 4;
+
 esp_mqtt_client_handle_t g_mqtt_client = nullptr;
+TaskHandle_t g_mqtt_manager_task = nullptr;
 
 std::atomic_bool g_connected{false};
-
-bool g_initialized = false;
+std::atomic_bool g_initialized{false};
 
 esp_err_t validate_mqtt_configuration()
 {
-    if (std::strlen(CONFIG_CARECALL_MQTT_BROKER_HOST) == 0) {
-        ESP_LOGE(TAG, "MQTT Broker address is empty");
+    if (std::strlen(
+            CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST
+        ) == 0) {
+
+        ESP_LOGE(TAG, "MQTT Broker mDNS hostname is empty");
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -72,6 +90,13 @@ bool is_ack_topic(const esp_mqtt_event_handle_t event)
            ) == 0;
 }
 
+void notify_mqtt_manager_of_disconnect()
+{
+    if (g_mqtt_manager_task != nullptr) {
+        xTaskNotifyGive(g_mqtt_manager_task);
+    }
+}
+
 void mqtt_event_handler(
     void* handler_argument,
     esp_event_base_t event_base,
@@ -95,10 +120,7 @@ void mqtt_event_handler(
         case MQTT_EVENT_CONNECTED: {
             g_connected.store(true);
 
-            ESP_LOGI(
-                TAG,
-                "Connected to MQTT Broker"
-            );
+            ESP_LOGI(TAG, "Connected to MQTT Broker");
 
             const int message_id =
                 esp_mqtt_client_subscribe(
@@ -133,8 +155,10 @@ void mqtt_event_handler(
             ESP_LOGW(
                 TAG,
                 "Disconnected from MQTT Broker; "
-                "automatic reconnect will be attempted"
+                "mDNS rediscovery will be attempted"
             );
+
+            notify_mqtt_manager_of_disconnect();
             break;
 
         case MQTT_EVENT_SUBSCRIBED:
@@ -215,32 +239,78 @@ void mqtt_event_handler(
     }
 }
 
-}  // namespace
-
-esp_err_t mqtt_manager_init()
+bool resolve_broker_uri(
+    char* broker_uri,
+    const std::size_t broker_uri_size
+)
 {
-    if (g_initialized) {
-        ESP_LOGW(TAG, "MQTT manager is already initialized");
-        return ESP_OK;
+    esp_ip4_addr_t broker_address{};
+
+    ESP_LOGI(
+        TAG,
+        "Resolving MQTT Broker by mDNS: %s.local",
+        CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST
+    );
+
+    const esp_err_t result =
+        mdns_query_a(
+            CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST,
+            MDNS_QUERY_TIMEOUT_MS,
+            &broker_address
+        );
+
+    if (result != ESP_OK) {
+        if (result == ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(
+                TAG,
+                "mDNS host not found: %s.local",
+                CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST
+            );
+        } else {
+            ESP_LOGW(
+                TAG,
+                "mDNS query failed: host=%s.local, error=%s",
+                CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST,
+                esp_err_to_name(result)
+            );
+        }
+
+        return false;
     }
 
-    const esp_err_t validation_result =
-        validate_mqtt_configuration();
+    const int written =
+        std::snprintf(
+            broker_uri,
+            broker_uri_size,
+            "mqtt://" IPSTR ":%d",
+            IP2STR(&broker_address),
+            CONFIG_CARECALL_MQTT_BROKER_PORT
+        );
 
-    if (validation_result != ESP_OK) {
-        return validation_result;
+    if (written < 0 ||
+        static_cast<std::size_t>(written) >= broker_uri_size) {
+
+        ESP_LOGE(TAG, "MQTT Broker URI buffer is too small");
+        return false;
     }
 
+    ESP_LOGI(
+        TAG,
+        "mDNS resolved: %s.local -> " IPSTR,
+        CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST,
+        IP2STR(&broker_address)
+    );
+
+    return true;
+}
+
+esp_mqtt_client_config_t make_mqtt_configuration(
+    const char* broker_uri
+)
+{
     esp_mqtt_client_config_t mqtt_config{};
 
-    mqtt_config.broker.address.hostname =
-        CONFIG_CARECALL_MQTT_BROKER_HOST;
-
-    mqtt_config.broker.address.port =
-        CONFIG_CARECALL_MQTT_BROKER_PORT;
-
-    mqtt_config.broker.address.transport =
-        MQTT_TRANSPORT_OVER_TCP;
+    mqtt_config.broker.address.uri = broker_uri;
 
     mqtt_config.credentials.username =
         CONFIG_CARECALL_MQTT_USERNAME;
@@ -256,16 +326,24 @@ esp_err_t mqtt_manager_init()
 
     mqtt_config.session.keepalive = 60;
 
-    mqtt_config.network.reconnect_timeout_ms = 5000;
+    // 과거 IP로 ESP-MQTT가 자동 재연결하지 않도록 끕니다.
+    // 이 파일의 관리 작업이 mDNS를 다시 조회한 뒤 재연결합니다.
+    mqtt_config.network.disable_auto_reconnect = true;
 
-    mqtt_config.network.disable_auto_reconnect = false;
+    return mqtt_config;
+}
+
+bool create_and_start_mqtt_client(const char* broker_uri)
+{
+    const esp_mqtt_client_config_t mqtt_config =
+        make_mqtt_configuration(broker_uri);
 
     g_mqtt_client =
         esp_mqtt_client_init(&mqtt_config);
 
     if (g_mqtt_client == nullptr) {
         ESP_LOGE(TAG, "Failed to create MQTT client");
-        return ESP_ERR_NO_MEM;
+        return false;
     }
 
     esp_err_t result =
@@ -286,7 +364,7 @@ esp_err_t mqtt_manager_init()
         esp_mqtt_client_destroy(g_mqtt_client);
         g_mqtt_client = nullptr;
 
-        return result;
+        return false;
     }
 
     result = esp_mqtt_client_start(g_mqtt_client);
@@ -301,18 +379,172 @@ esp_err_t mqtt_manager_init()
         esp_mqtt_client_destroy(g_mqtt_client);
         g_mqtt_client = nullptr;
 
-        return result;
+        return false;
     }
-
-    g_initialized = true;
 
     ESP_LOGI(
         TAG,
-        "MQTT client started: broker=%s, port=%d, "
-        "client_id=%s",
-        CONFIG_CARECALL_MQTT_BROKER_HOST,
-        CONFIG_CARECALL_MQTT_BROKER_PORT,
+        "MQTT client started: broker=%s, client_id=%s",
+        broker_uri,
         CONFIG_CARECALL_MQTT_CLIENT_ID
+    );
+
+    return true;
+}
+
+void mqtt_manager_task(void* task_argument)
+{
+    (void)task_argument;
+
+    char broker_uri[64]{};
+
+    while (!resolve_broker_uri(broker_uri, sizeof(broker_uri)) ||
+           !create_and_start_mqtt_client(broker_uri)) {
+
+        ESP_LOGW(
+            TAG,
+            "MQTT startup will be retried in %lu ms",
+            static_cast<unsigned long>(RECONNECT_DELAY_MS)
+        );
+
+        vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+    }
+
+    while (true) {
+        // MQTT_EVENT_DISCONNECTED에서 전달되는 알림을 기다립니다.
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        // 이벤트 콜백이 완전히 반환된 뒤 MQTT API를 호출합니다.
+        vTaskDelay(
+            pdMS_TO_TICKS(EVENT_HANDLER_RETURN_DELAY_MS)
+        );
+
+        ESP_LOGW(
+            TAG,
+            "Waiting %lu ms before mDNS rediscovery",
+            static_cast<unsigned long>(RECONNECT_DELAY_MS)
+        );
+
+        vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+
+        while (true) {
+            if (!resolve_broker_uri(
+                    broker_uri,
+                    sizeof(broker_uri))) {
+
+                ESP_LOGW(
+                    TAG,
+                    "mDNS rediscovery will be retried in %lu ms",
+                    static_cast<unsigned long>(RECONNECT_DELAY_MS)
+                );
+
+                vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+                continue;
+            }
+
+            esp_err_t result =
+                esp_mqtt_client_set_uri(
+                    g_mqtt_client,
+                    broker_uri
+                );
+
+            if (result != ESP_OK) {
+                ESP_LOGE(
+                    TAG,
+                    "MQTT Broker URI update failed: %s",
+                    esp_err_to_name(result)
+                );
+
+                vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+                continue;
+            }
+
+            result = esp_mqtt_client_reconnect(g_mqtt_client);
+
+            if (result != ESP_OK) {
+                ESP_LOGW(
+                    TAG,
+                    "MQTT reconnect request failed: %s; "
+                    "retrying in %lu ms",
+                    esp_err_to_name(result),
+                    static_cast<unsigned long>(RECONNECT_DELAY_MS)
+                );
+
+                vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+                continue;
+            }
+
+            ESP_LOGI(
+                TAG,
+                "MQTT reconnect requested with refreshed address: %s",
+                broker_uri
+            );
+
+            break;
+        }
+    }
+}
+
+}  // namespace
+
+esp_err_t mqtt_manager_init()
+{
+    bool expected = false;
+
+    if (!g_initialized.compare_exchange_strong(
+            expected,
+            true)) {
+
+        ESP_LOGW(TAG, "MQTT manager is already initialized");
+        return ESP_OK;
+    }
+
+    const esp_err_t validation_result =
+        validate_mqtt_configuration();
+
+    if (validation_result != ESP_OK) {
+        g_initialized.store(false);
+        return validation_result;
+    }
+
+    const esp_err_t mdns_result = mdns_init();
+
+    if (mdns_result != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "mDNS initialization failed: %s",
+            esp_err_to_name(mdns_result)
+        );
+
+        g_initialized.store(false);
+        return mdns_result;
+    }
+
+    const BaseType_t task_result =
+        xTaskCreate(
+            mqtt_manager_task,
+            "mqtt_mdns_mgr",
+            MQTT_MANAGER_TASK_STACK_SIZE,
+            nullptr,
+            MQTT_MANAGER_TASK_PRIORITY,
+            &g_mqtt_manager_task
+        );
+
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create MQTT manager task");
+
+        mdns_free();
+        g_mqtt_manager_task = nullptr;
+        g_initialized.store(false);
+
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "MQTT manager initialized: mDNS host=%s.local, port=%d",
+        CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST,
+        CONFIG_CARECALL_MQTT_BROKER_PORT
     );
 
     return ESP_OK;
