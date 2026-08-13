@@ -1,4 +1,5 @@
 #include "button_driver.h"
+#include "call_manager.h"
 #include "mqtt_manager.h"
 #include "wifi_manager.h"
 
@@ -15,16 +16,15 @@ void on_call_button_pressed()
 {
     ESP_LOGW(TAG, "CALL REQUEST detected");
 
-    /*
-     * 이번 단계에서는 버튼 MQTT 발행을 아직 수행하지 않습니다.
-     *
-     * 다음 단계:
-     * call_manager_request_call()
-     * -> event_id 생성
-     * -> 호출 JSON 생성
-     * -> MQTT QoS 1 발행
-     * -> Raspberry Pi Application ACK 대기
-     */
+    const esp_err_t result = call_manager_request_call();
+
+    if (result != ESP_OK) {
+        ESP_LOGW(
+            TAG,
+            "Call request was not queued: %s",
+            esp_err_to_name(result)
+        );
+    }
 }
 
 }  // namespace
