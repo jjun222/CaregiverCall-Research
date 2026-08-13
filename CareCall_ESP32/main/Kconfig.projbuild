@@ -18,12 +18,19 @@ endmenu
 
 menu "CareCall MQTT configuration"
 
+    config CARECALL_DEVICE_ID
+        string "CareCall device ID"
+        default "button01"
+        help
+            MQTT 토픽과 호출 JSON에서 사용할 장치 ID입니다.
+            영문자, 숫자, 하이픈(-), 밑줄(_)만 사용합니다.
+
     config CARECALL_MQTT_BROKER_MDNS_HOST
         string "MQTT Broker mDNS hostname without .local"
-        default "carecall-pi"
+        default "carecall-mqtt-server"
         help
             Raspberry Pi의 mDNS 호스트명입니다.
-            .local을 제외한 carecall-pi만 입력합니다.
+            .local을 제외한 carecall-mqtt-server만 입력합니다.
 
     config CARECALL_MQTT_BROKER_PORT
         int "MQTT Broker port"
