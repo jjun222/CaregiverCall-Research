@@ -1,6 +1,7 @@
 #include "mqtt_manager.h"
 
 #include <atomic>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -20,9 +21,18 @@ namespace {
 
 constexpr char TAG[] = "MQTT";
 
-constexpr char ACK_TOPIC[] =
-    "carecall/v1/devices/button01/ack";
+constexpr char CALL_TOPIC[] =
+    "carecall/v1/devices/"
+    CONFIG_CARECALL_DEVICE_ID
+    "/call";
 
+constexpr char ACK_TOPIC[] =
+    "carecall/v1/devices/"
+    CONFIG_CARECALL_DEVICE_ID
+    "/ack";
+
+constexpr int CALL_QOS = 1;
+constexpr int CALL_RETAIN = 0;
 constexpr int ACK_QOS = 1;
 
 constexpr uint32_t MDNS_QUERY_TIMEOUT_MS = 2000;
@@ -38,8 +48,53 @@ TaskHandle_t g_mqtt_manager_task = nullptr;
 std::atomic_bool g_connected{false};
 std::atomic_bool g_initialized{false};
 
+bool is_valid_device_id(const char* device_id)
+{
+    if (device_id == nullptr || device_id[0] == '\0') {
+        return false;
+    }
+
+    for (const char* cursor = device_id;
+         *cursor != '\0';
+         ++cursor) {
+
+        const char value = *cursor;
+
+        const bool is_lowercase =
+            value >= 'a' && value <= 'z';
+
+        const bool is_uppercase =
+            value >= 'A' && value <= 'Z';
+
+        const bool is_digit =
+            value >= '0' && value <= '9';
+
+        if (!is_lowercase &&
+            !is_uppercase &&
+            !is_digit &&
+            value != '-' &&
+            value != '_') {
+
+            return false;
+        }
+    }
+
+    return true;
+}
+
 esp_err_t validate_mqtt_configuration()
 {
+    if (!is_valid_device_id(CONFIG_CARECALL_DEVICE_ID) ||
+        std::strlen(CONFIG_CARECALL_DEVICE_ID) > 32) {
+
+        ESP_LOGE(
+            TAG,
+            "Device ID must be 1-32 characters and contain only "
+            "letters, digits, '-' or '_'"
+        );
+        return ESP_ERR_INVALID_ARG;
+    }
+
     if (std::strlen(
             CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST
         ) == 0) {
@@ -165,6 +220,14 @@ void mqtt_event_handler(
             ESP_LOGI(
                 TAG,
                 "MQTT SUBACK received: message_id=%d",
+                event->msg_id
+            );
+            break;
+
+        case MQTT_EVENT_PUBLISHED:
+            ESP_LOGI(
+                TAG,
+                "MQTT PUBACK received: message_id=%d",
                 event->msg_id
             );
             break;
@@ -553,4 +616,75 @@ esp_err_t mqtt_manager_init()
 bool mqtt_manager_is_connected()
 {
     return g_connected.load();
+}
+
+esp_err_t mqtt_manager_publish_call(
+    const char* payload,
+    const std::size_t payload_length,
+    int* message_id
+)
+{
+    if (payload == nullptr ||
+        payload_length == 0 ||
+        message_id == nullptr) {
+
+        ESP_LOGE(TAG, "Call publish arguments are invalid");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (payload_length > static_cast<std::size_t>(INT_MAX)) {
+        ESP_LOGE(TAG, "Call payload is too large");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!g_initialized.load() ||
+        g_mqtt_client == nullptr ||
+        !g_connected.load()) {
+
+        ESP_LOGW(
+            TAG,
+            "Call publish rejected: MQTT is not connected"
+        );
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const int queued_message_id =
+        esp_mqtt_client_enqueue(
+            g_mqtt_client,
+            CALL_TOPIC,
+            payload,
+            static_cast<int>(payload_length),
+            CALL_QOS,
+            CALL_RETAIN,
+            true
+        );
+
+    if (queued_message_id < 0) {
+        ESP_LOGE(
+            TAG,
+            "Call publish queue failed: result=%d",
+            queued_message_id
+        );
+
+        if (queued_message_id == -2) {
+            return ESP_ERR_NO_MEM;
+        }
+
+        return ESP_FAIL;
+    }
+
+    *message_id = queued_message_id;
+
+    ESP_LOGI(
+        TAG,
+        "Call publish queued: topic=%s, qos=%d, "
+        "retain=false, message_id=%d, payload=%.*s",
+        CALL_TOPIC,
+        CALL_QOS,
+        queued_message_id,
+        static_cast<int>(payload_length),
+        payload
+    );
+
+    return ESP_OK;
 }
