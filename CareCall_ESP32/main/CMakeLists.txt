@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.cpp"
         "button_driver.cpp"
+        "call_manager.cpp"
         "wifi_manager.cpp"
         "mqtt_manager.cpp"
 
@@ -15,5 +16,7 @@ idf_component_register(
         esp_netif
         nvs_flash
         mqtt
+        esp_timer
+        esp_hw_support
         espressif__mdns
 )
