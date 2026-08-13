@@ -1,426 +1,690 @@
-#include "wifi_manager.h"
+#include "mqtt_manager.h"
 
+#include <atomic>
+#include <climits>
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
-#include "esp_wifi.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
-#include "nvs_flash.h"
+#include "mdns.h"
+#include "mqtt_client.h"
 #include "sdkconfig.h"
 
 namespace {
 
-constexpr char TAG[] = "WIFI";
+constexpr char TAG[] = "MQTT";
 
-constexpr EventBits_t WIFI_CONNECTED_BIT = BIT0;
+constexpr char CALL_TOPIC[] =
+    "carecall/v1/devices/"
+    CONFIG_CARECALL_DEVICE_ID
+    "/call";
 
-EventGroupHandle_t g_wifi_event_group = nullptr;
+constexpr char ACK_TOPIC[] =
+    "carecall/v1/devices/"
+    CONFIG_CARECALL_DEVICE_ID
+    "/ack";
 
-esp_event_handler_instance_t g_wifi_event_handler = nullptr;
-esp_event_handler_instance_t g_ip_event_handler = nullptr;
+constexpr int CALL_QOS = 1;
+constexpr int CALL_RETAIN = 0;
+constexpr int ACK_QOS = 1;
 
-bool g_initialized = false;
-unsigned int g_reconnect_attempt = 0;
+constexpr uint32_t MDNS_QUERY_TIMEOUT_MS = 2000;
+constexpr uint32_t RECONNECT_DELAY_MS = 5000;
+constexpr uint32_t EVENT_HANDLER_RETURN_DELAY_MS = 100;
 
-/**
- * @brief Wi-Fi 드라이버가 사용하는 NVS를 초기화합니다.
- */
-esp_err_t initialize_nvs()
+constexpr uint32_t MQTT_MANAGER_TASK_STACK_SIZE = 6144;
+constexpr UBaseType_t MQTT_MANAGER_TASK_PRIORITY = 4;
+
+esp_mqtt_client_handle_t g_mqtt_client = nullptr;
+TaskHandle_t g_mqtt_manager_task = nullptr;
+
+std::atomic_bool g_connected{false};
+std::atomic_bool g_initialized{false};
+
+bool is_valid_device_id(const char* device_id)
 {
-    esp_err_t result = nvs_flash_init();
+    if (device_id == nullptr || device_id[0] == '\0') {
+        return false;
+    }
 
-    if (result == ESP_ERR_NVS_NO_FREE_PAGES ||
-        result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    for (const char* cursor = device_id;
+         *cursor != '\0';
+         ++cursor) {
 
-        ESP_LOGW(
-            TAG,
-            "NVS requires erase before reinitialization: %s",
-            esp_err_to_name(result)
-        );
+        const char value = *cursor;
 
-        result = nvs_flash_erase();
-        if (result != ESP_OK) {
-            ESP_LOGE(
-                TAG,
-                "Failed to erase NVS: %s",
-                esp_err_to_name(result)
-            );
-            return result;
+        const bool is_lowercase =
+            value >= 'a' && value <= 'z';
+
+        const bool is_uppercase =
+            value >= 'A' && value <= 'Z';
+
+        const bool is_digit =
+            value >= '0' && value <= '9';
+
+        if (!is_lowercase &&
+            !is_uppercase &&
+            !is_digit &&
+            value != '-' &&
+            value != '_') {
+
+            return false;
         }
-
-        result = nvs_flash_init();
     }
 
-    if (result != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "Failed to initialize NVS: %s",
-            esp_err_to_name(result)
-        );
-    }
-
-    return result;
+    return true;
 }
 
-/**
- * @brief menuconfig에 저장된 SSID와 비밀번호 길이를 검사합니다.
- */
-esp_err_t validate_wifi_configuration()
+esp_err_t validate_mqtt_configuration()
 {
-    const std::size_t ssid_length =
-        std::strlen(CONFIG_CARECALL_WIFI_SSID);
+    if (!is_valid_device_id(CONFIG_CARECALL_DEVICE_ID) ||
+        std::strlen(CONFIG_CARECALL_DEVICE_ID) > 32) {
 
-    const std::size_t password_length =
-        std::strlen(CONFIG_CARECALL_WIFI_PASSWORD);
-
-    if (ssid_length == 0) {
-        ESP_LOGE(TAG, "Wi-Fi SSID is empty");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // ESP-IDF wifi_sta_config_t의 SSID 공간은 최대 32바이트입니다.
-    if (ssid_length > 32) {
         ESP_LOGE(
             TAG,
-            "Wi-Fi SSID is too long: %u bytes",
-            static_cast<unsigned int>(ssid_length)
+            "Device ID must be 1-32 characters and contain only "
+            "letters, digits, '-' or '_'"
         );
         return ESP_ERR_INVALID_ARG;
     }
 
-    /*
-     * 이번 시험은 일반 WPA2/WPA3 Personal 비밀번호를 기준으로 합니다.
-     * 비밀번호가 있으면 8~63바이트 범위로 제한합니다.
-     * 비밀번호가 비어 있으면 개방형 네트워크로 처리합니다.
-     */
-    if (password_length != 0 &&
-        (password_length < 8 || password_length > 63)) {
+    if (std::strlen(
+            CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST
+        ) == 0) {
 
-        ESP_LOGE(
-            TAG,
-            "Wi-Fi password must be empty or 8-63 bytes"
-        );
+        ESP_LOGE(TAG, "MQTT Broker mDNS hostname is empty");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (CONFIG_CARECALL_MQTT_BROKER_PORT < 1 ||
+        CONFIG_CARECALL_MQTT_BROKER_PORT > 65535) {
+
+        ESP_LOGE(TAG, "MQTT Broker port is invalid");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (std::strlen(CONFIG_CARECALL_MQTT_USERNAME) == 0) {
+        ESP_LOGE(TAG, "MQTT username is empty");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (std::strlen(CONFIG_CARECALL_MQTT_PASSWORD) == 0) {
+        ESP_LOGE(TAG, "MQTT password is empty");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (std::strlen(CONFIG_CARECALL_MQTT_CLIENT_ID) == 0) {
+        ESP_LOGE(TAG, "MQTT Client ID is empty");
         return ESP_ERR_INVALID_ARG;
     }
 
     return ESP_OK;
 }
 
-/**
- * @brief Wi-Fi 및 IP 이벤트 처리 함수입니다.
- */
-void event_handler(
-    void* argument,
+bool is_ack_topic(const esp_mqtt_event_handle_t event)
+{
+    if (event == nullptr || event->topic == nullptr) {
+        return false;
+    }
+
+    const int expected_length =
+        static_cast<int>(std::strlen(ACK_TOPIC));
+
+    return event->topic_len == expected_length &&
+           std::memcmp(
+               event->topic,
+               ACK_TOPIC,
+               expected_length
+           ) == 0;
+}
+
+void notify_mqtt_manager_of_disconnect()
+{
+    if (g_mqtt_manager_task != nullptr) {
+        xTaskNotifyGive(g_mqtt_manager_task);
+    }
+}
+
+void mqtt_event_handler(
+    void* handler_argument,
     esp_event_base_t event_base,
     int32_t event_id,
     void* event_data
 )
 {
-    (void)argument;
+    (void)handler_argument;
+    (void)event_base;
 
-    if (event_base == WIFI_EVENT &&
-        event_id == WIFI_EVENT_STA_START) {
+    const auto event =
+        static_cast<esp_mqtt_event_handle_t>(event_data);
 
-        ESP_LOGI(
-            TAG,
-            "Wi-Fi station started; connecting to SSID=\"%s\"",
-            CONFIG_CARECALL_WIFI_SSID
+    if (event == nullptr) {
+        ESP_LOGE(TAG, "MQTT event data is null");
+        return;
+    }
+
+    switch (static_cast<esp_mqtt_event_id_t>(event_id)) {
+
+        case MQTT_EVENT_CONNECTED: {
+            g_connected.store(true);
+
+            ESP_LOGI(TAG, "Connected to MQTT Broker");
+
+            const int message_id =
+                esp_mqtt_client_subscribe(
+                    event->client,
+                    ACK_TOPIC,
+                    ACK_QOS
+                );
+
+            if (message_id < 0) {
+                ESP_LOGE(
+                    TAG,
+                    "ACK subscription request failed: result=%d",
+                    message_id
+                );
+            } else {
+                ESP_LOGI(
+                    TAG,
+                    "ACK subscription requested: "
+                    "topic=%s, qos=%d, message_id=%d",
+                    ACK_TOPIC,
+                    ACK_QOS,
+                    message_id
+                );
+            }
+
+            break;
+        }
+
+        case MQTT_EVENT_DISCONNECTED:
+            g_connected.store(false);
+
+            ESP_LOGW(
+                TAG,
+                "Disconnected from MQTT Broker; "
+                "mDNS rediscovery will be attempted"
+            );
+
+            notify_mqtt_manager_of_disconnect();
+            break;
+
+        case MQTT_EVENT_SUBSCRIBED:
+            ESP_LOGI(
+                TAG,
+                "MQTT SUBACK received: message_id=%d",
+                event->msg_id
+            );
+            break;
+
+        case MQTT_EVENT_PUBLISHED:
+            ESP_LOGI(
+                TAG,
+                "MQTT PUBACK received: message_id=%d",
+                event->msg_id
+            );
+            break;
+
+        case MQTT_EVENT_DATA:
+            if (is_ack_topic(event)) {
+                ESP_LOGI(
+                    TAG,
+                    "Application ACK received: "
+                    "topic=%.*s, payload=%.*s",
+                    event->topic_len,
+                    event->topic,
+                    event->data_len,
+                    event->data != nullptr ? event->data : ""
+                );
+            } else {
+                ESP_LOGW(
+                    TAG,
+                    "Message received from unexpected topic: %.*s",
+                    event->topic_len,
+                    event->topic != nullptr ? event->topic : ""
+                );
+            }
+            break;
+
+        case MQTT_EVENT_ERROR:
+            g_connected.store(false);
+
+            if (event->error_handle == nullptr) {
+                ESP_LOGE(TAG, "MQTT error occurred");
+                break;
+            }
+
+            if (event->error_handle->error_type ==
+                MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+
+                ESP_LOGE(
+                    TAG,
+                    "Broker refused MQTT connection: "
+                    "return_code=%d",
+                    static_cast<int>(
+                        event->error_handle->connect_return_code
+                    )
+                );
+            } else if (
+                event->error_handle->error_type ==
+                MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+
+                ESP_LOGE(
+                    TAG,
+                    "MQTT TCP transport error: "
+                    "esp_error=0x%x, socket_errno=%d",
+                    static_cast<unsigned int>(
+                        event->error_handle->esp_tls_last_esp_err
+                    ),
+                    event->error_handle->esp_transport_sock_errno
+                );
+            } else {
+                ESP_LOGE(
+                    TAG,
+                    "MQTT error occurred: error_type=%d",
+                    static_cast<int>(
+                        event->error_handle->error_type
+                    )
+                );
+            }
+
+            break;
+
+        default:
+            break;
+    }
+}
+
+bool resolve_broker_uri(
+    char* broker_uri,
+    const std::size_t broker_uri_size
+)
+{
+    esp_ip4_addr_t broker_address{};
+
+    ESP_LOGI(
+        TAG,
+        "Resolving MQTT Broker by mDNS: %s.local",
+        CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST
+    );
+
+    const esp_err_t result =
+        mdns_query_a(
+            CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST,
+            MDNS_QUERY_TIMEOUT_MS,
+            &broker_address
         );
 
-        const esp_err_t result = esp_wifi_connect();
-
-        if (result != ESP_OK) {
-            ESP_LOGE(
+    if (result != ESP_OK) {
+        if (result == ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(
                 TAG,
-                "esp_wifi_connect() failed: %s",
+                "mDNS host not found: %s.local",
+                CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST
+            );
+        } else {
+            ESP_LOGW(
+                TAG,
+                "mDNS query failed: host=%s.local, error=%s",
+                CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST,
                 esp_err_to_name(result)
             );
         }
 
-        return;
+        return false;
     }
 
-    if (event_base == WIFI_EVENT &&
-        event_id == WIFI_EVENT_STA_DISCONNECTED) {
-
-        xEventGroupClearBits(
-            g_wifi_event_group,
-            WIFI_CONNECTED_BIT
+    const int written =
+        std::snprintf(
+            broker_uri,
+            broker_uri_size,
+            "mqtt://" IPSTR ":%d",
+            IP2STR(&broker_address),
+            CONFIG_CARECALL_MQTT_BROKER_PORT
         );
 
-        const auto* disconnected_event =
-            static_cast<wifi_event_sta_disconnected_t*>(event_data);
+    if (written < 0 ||
+        static_cast<std::size_t>(written) >= broker_uri_size) {
 
-        ++g_reconnect_attempt;
+        ESP_LOGE(TAG, "MQTT Broker URI buffer is too small");
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "mDNS resolved: %s.local -> " IPSTR,
+        CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST,
+        IP2STR(&broker_address)
+    );
+
+    return true;
+}
+
+esp_mqtt_client_config_t make_mqtt_configuration(
+    const char* broker_uri
+)
+{
+    esp_mqtt_client_config_t mqtt_config{};
+
+    mqtt_config.broker.address.uri = broker_uri;
+
+    mqtt_config.credentials.username =
+        CONFIG_CARECALL_MQTT_USERNAME;
+
+    mqtt_config.credentials.client_id =
+        CONFIG_CARECALL_MQTT_CLIENT_ID;
+
+    mqtt_config.credentials.authentication.password =
+        CONFIG_CARECALL_MQTT_PASSWORD;
+
+    mqtt_config.session.protocol_ver =
+        MQTT_PROTOCOL_V_3_1_1;
+
+    mqtt_config.session.keepalive = 60;
+
+    // 과거 IP로 ESP-MQTT가 자동 재연결하지 않도록 끕니다.
+    // 이 파일의 관리 작업이 mDNS를 다시 조회한 뒤 재연결합니다.
+    mqtt_config.network.disable_auto_reconnect = true;
+
+    return mqtt_config;
+}
+
+bool create_and_start_mqtt_client(const char* broker_uri)
+{
+    const esp_mqtt_client_config_t mqtt_config =
+        make_mqtt_configuration(broker_uri);
+
+    g_mqtt_client =
+        esp_mqtt_client_init(&mqtt_config);
+
+    if (g_mqtt_client == nullptr) {
+        ESP_LOGE(TAG, "Failed to create MQTT client");
+        return false;
+    }
+
+    esp_err_t result =
+        esp_mqtt_client_register_event(
+            g_mqtt_client,
+            MQTT_EVENT_ANY,
+            mqtt_event_handler,
+            nullptr
+        );
+
+    if (result != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "MQTT event registration failed: %s",
+            esp_err_to_name(result)
+        );
+
+        esp_mqtt_client_destroy(g_mqtt_client);
+        g_mqtt_client = nullptr;
+
+        return false;
+    }
+
+    result = esp_mqtt_client_start(g_mqtt_client);
+
+    if (result != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "MQTT client start failed: %s",
+            esp_err_to_name(result)
+        );
+
+        esp_mqtt_client_destroy(g_mqtt_client);
+        g_mqtt_client = nullptr;
+
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "MQTT client started: broker=%s, client_id=%s",
+        broker_uri,
+        CONFIG_CARECALL_MQTT_CLIENT_ID
+    );
+
+    return true;
+}
+
+void mqtt_manager_task(void* task_argument)
+{
+    (void)task_argument;
+
+    char broker_uri[64]{};
+
+    while (!resolve_broker_uri(broker_uri, sizeof(broker_uri)) ||
+           !create_and_start_mqtt_client(broker_uri)) {
 
         ESP_LOGW(
             TAG,
-            "Disconnected from access point: reason=%u, reconnect_attempt=%u",
-            static_cast<unsigned int>(disconnected_event->reason),
-            g_reconnect_attempt
+            "MQTT startup will be retried in %lu ms",
+            static_cast<unsigned long>(RECONNECT_DELAY_MS)
         );
 
-        const esp_err_t result = esp_wifi_connect();
-
-        if (result != ESP_OK) {
-            ESP_LOGE(
-                TAG,
-                "Wi-Fi reconnect request failed: %s",
-                esp_err_to_name(result)
-            );
-        }
-
-        return;
+        vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
     }
 
-    if (event_base == IP_EVENT &&
-        event_id == IP_EVENT_STA_GOT_IP) {
+    while (true) {
+        // MQTT_EVENT_DISCONNECTED에서 전달되는 알림을 기다립니다.
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        const auto* got_ip_event =
-            static_cast<ip_event_got_ip_t*>(event_data);
-
-        g_reconnect_attempt = 0;
-
-        xEventGroupSetBits(
-            g_wifi_event_group,
-            WIFI_CONNECTED_BIT
+        // 이벤트 콜백이 완전히 반환된 뒤 MQTT API를 호출합니다.
+        vTaskDelay(
+            pdMS_TO_TICKS(EVENT_HANDLER_RETURN_DELAY_MS)
         );
 
-        ESP_LOGI(TAG, "Connected to Wi-Fi access point");
-
-        ESP_LOGI(
+        ESP_LOGW(
             TAG,
-            "IPv4 address: " IPSTR,
-            IP2STR(&got_ip_event->ip_info.ip)
+            "Waiting %lu ms before mDNS rediscovery",
+            static_cast<unsigned long>(RECONNECT_DELAY_MS)
         );
 
-        ESP_LOGI(
-            TAG,
-            "Gateway: " IPSTR,
-            IP2STR(&got_ip_event->ip_info.gw)
-        );
+        vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
 
-        ESP_LOGI(
-            TAG,
-            "Netmask: " IPSTR,
-            IP2STR(&got_ip_event->ip_info.netmask)
-        );
+        while (true) {
+            if (!resolve_broker_uri(
+                    broker_uri,
+                    sizeof(broker_uri))) {
+
+                ESP_LOGW(
+                    TAG,
+                    "mDNS rediscovery will be retried in %lu ms",
+                    static_cast<unsigned long>(RECONNECT_DELAY_MS)
+                );
+
+                vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+                continue;
+            }
+
+            esp_err_t result =
+                esp_mqtt_client_set_uri(
+                    g_mqtt_client,
+                    broker_uri
+                );
+
+            if (result != ESP_OK) {
+                ESP_LOGE(
+                    TAG,
+                    "MQTT Broker URI update failed: %s",
+                    esp_err_to_name(result)
+                );
+
+                vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+                continue;
+            }
+
+            result = esp_mqtt_client_reconnect(g_mqtt_client);
+
+            if (result != ESP_OK) {
+                ESP_LOGW(
+                    TAG,
+                    "MQTT reconnect request failed: %s; "
+                    "retrying in %lu ms",
+                    esp_err_to_name(result),
+                    static_cast<unsigned long>(RECONNECT_DELAY_MS)
+                );
+
+                vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+                continue;
+            }
+
+            ESP_LOGI(
+                TAG,
+                "MQTT reconnect requested with refreshed address: %s",
+                broker_uri
+            );
+
+            break;
+        }
     }
 }
 
 }  // namespace
 
-esp_err_t wifi_manager_init()
+esp_err_t mqtt_manager_init()
 {
-    if (g_initialized) {
-        ESP_LOGW(TAG, "Wi-Fi manager is already initialized");
+    bool expected = false;
+
+    if (!g_initialized.compare_exchange_strong(
+            expected,
+            true)) {
+
+        ESP_LOGW(TAG, "MQTT manager is already initialized");
         return ESP_OK;
     }
 
-    esp_err_t result = validate_wifi_configuration();
-    if (result != ESP_OK) {
-        return result;
+    const esp_err_t validation_result =
+        validate_mqtt_configuration();
+
+    if (validation_result != ESP_OK) {
+        g_initialized.store(false);
+        return validation_result;
     }
 
-    result = initialize_nvs();
-    if (result != ESP_OK) {
-        return result;
+    const esp_err_t mdns_result = mdns_init();
+
+    if (mdns_result != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "mDNS initialization failed: %s",
+            esp_err_to_name(mdns_result)
+        );
+
+        g_initialized.store(false);
+        return mdns_result;
     }
 
-    g_wifi_event_group = xEventGroupCreate();
+    const BaseType_t task_result =
+        xTaskCreate(
+            mqtt_manager_task,
+            "mqtt_mdns_mgr",
+            MQTT_MANAGER_TASK_STACK_SIZE,
+            nullptr,
+            MQTT_MANAGER_TASK_PRIORITY,
+            &g_mqtt_manager_task
+        );
 
-    if (g_wifi_event_group == nullptr) {
-        ESP_LOGE(TAG, "Failed to create Wi-Fi event group");
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create MQTT manager task");
+
+        mdns_free();
+        g_mqtt_manager_task = nullptr;
+        g_initialized.store(false);
+
         return ESP_ERR_NO_MEM;
     }
 
-    result = esp_netif_init();
-    if (result != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "esp_netif_init() failed: %s",
-            esp_err_to_name(result)
-        );
-        return result;
-    }
-
-    result = esp_event_loop_create_default();
-
-    /*
-     * 다른 기능이 먼저 기본 이벤트 루프를 생성한 경우에는
-     * ESP_ERR_INVALID_STATE가 반환될 수 있습니다.
-     */
-    if (result != ESP_OK &&
-        result != ESP_ERR_INVALID_STATE) {
-
-        ESP_LOGE(
-            TAG,
-            "Default event loop creation failed: %s",
-            esp_err_to_name(result)
-        );
-        return result;
-    }
-
-    esp_netif_t* station_netif =
-        esp_netif_create_default_wifi_sta();
-
-    if (station_netif == nullptr) {
-        ESP_LOGE(
-            TAG,
-            "Failed to create default Wi-Fi station interface"
-        );
-        return ESP_FAIL;
-    }
-
-    wifi_init_config_t wifi_init_config =
-        WIFI_INIT_CONFIG_DEFAULT();
-
-    result = esp_wifi_init(&wifi_init_config);
-    if (result != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "esp_wifi_init() failed: %s",
-            esp_err_to_name(result)
-        );
-        return result;
-    }
-
-    result = esp_event_handler_instance_register(
-        WIFI_EVENT,
-        ESP_EVENT_ANY_ID,
-        &event_handler,
-        nullptr,
-        &g_wifi_event_handler
-    );
-
-    if (result != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "Wi-Fi event handler registration failed: %s",
-            esp_err_to_name(result)
-        );
-        return result;
-    }
-
-    result = esp_event_handler_instance_register(
-        IP_EVENT,
-        IP_EVENT_STA_GOT_IP,
-        &event_handler,
-        nullptr,
-        &g_ip_event_handler
-    );
-
-    if (result != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "IP event handler registration failed: %s",
-            esp_err_to_name(result)
-        );
-        return result;
-    }
-
-    wifi_config_t wifi_config{};
-
-    const std::size_t ssid_length =
-        std::strlen(CONFIG_CARECALL_WIFI_SSID);
-
-    const std::size_t password_length =
-        std::strlen(CONFIG_CARECALL_WIFI_PASSWORD);
-
-    std::memcpy(
-        wifi_config.sta.ssid,
-        CONFIG_CARECALL_WIFI_SSID,
-        ssid_length
-    );
-
-    if (password_length > 0) {
-        std::memcpy(
-            wifi_config.sta.password,
-            CONFIG_CARECALL_WIFI_PASSWORD,
-            password_length
-        );
-
-        /*
-         * WPA2 이상의 Personal 네트워크만 허용합니다.
-         * WPA2/WPA3 혼합 모드도 이 기준으로 연결할 수 있습니다.
-         */
-        wifi_config.sta.threshold.authmode =
-            WIFI_AUTH_WPA2_PSK;
-    } else {
-        wifi_config.sta.threshold.authmode =
-            WIFI_AUTH_OPEN;
-    }
-
-    /*
-     * Protected Management Frames를 지원하되,
-     * 이번 시험에서는 필수로 강제하지 않습니다.
-     */
-    wifi_config.sta.pmf_cfg.capable = true;
-    wifi_config.sta.pmf_cfg.required = false;
-
-    result = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (result != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "Failed to set Wi-Fi Station mode: %s",
-            esp_err_to_name(result)
-        );
-        return result;
-    }
-
-    result = esp_wifi_set_config(
-        WIFI_IF_STA,
-        &wifi_config
-    );
-
-    if (result != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "Failed to apply Wi-Fi configuration: %s",
-            esp_err_to_name(result)
-        );
-        return result;
-    }
-
     ESP_LOGI(
         TAG,
-        "Wi-Fi configuration applied: mode=STA, SSID=\"%s\"",
-        CONFIG_CARECALL_WIFI_SSID
-    );
-
-    result = esp_wifi_start();
-    if (result != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "esp_wifi_start() failed: %s",
-            esp_err_to_name(result)
-        );
-        return result;
-    }
-
-    g_initialized = true;
-
-    ESP_LOGI(
-        TAG,
-        "Wi-Fi manager initialized; waiting for IPv4 address"
+        "MQTT manager initialized: mDNS host=%s.local, port=%d",
+        CONFIG_CARECALL_MQTT_BROKER_MDNS_HOST,
+        CONFIG_CARECALL_MQTT_BROKER_PORT
     );
 
     return ESP_OK;
 }
 
-bool wifi_manager_is_connected()
+bool mqtt_manager_is_connected()
 {
-    if (g_wifi_event_group == nullptr) {
-        return false;
+    return g_connected.load();
+}
+
+esp_err_t mqtt_manager_publish_call(
+    const char* payload,
+    const std::size_t payload_length,
+    int* message_id
+)
+{
+    if (payload == nullptr ||
+        payload_length == 0 ||
+        message_id == nullptr) {
+
+        ESP_LOGE(TAG, "Call publish arguments are invalid");
+        return ESP_ERR_INVALID_ARG;
     }
 
-    const EventBits_t bits =
-        xEventGroupGetBits(g_wifi_event_group);
+    if (payload_length > static_cast<std::size_t>(INT_MAX)) {
+        ESP_LOGE(TAG, "Call payload is too large");
+        return ESP_ERR_INVALID_ARG;
+    }
 
-    return (bits & WIFI_CONNECTED_BIT) != 0;
+    if (!g_initialized.load() ||
+        g_mqtt_client == nullptr ||
+        !g_connected.load()) {
+
+        ESP_LOGW(
+            TAG,
+            "Call publish rejected: MQTT is not connected"
+        );
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const int queued_message_id =
+        esp_mqtt_client_enqueue(
+            g_mqtt_client,
+            CALL_TOPIC,
+            payload,
+            static_cast<int>(payload_length),
+            CALL_QOS,
+            CALL_RETAIN,
+            true
+        );
+
+    if (queued_message_id < 0) {
+        ESP_LOGE(
+            TAG,
+            "Call publish queue failed: result=%d",
+            queued_message_id
+        );
+
+        if (queued_message_id == -2) {
+            return ESP_ERR_NO_MEM;
+        }
+
+        return ESP_FAIL;
+    }
+
+    *message_id = queued_message_id;
+
+    ESP_LOGI(
+        TAG,
+        "Call publish queued: topic=%s, qos=%d, "
+        "retain=false, message_id=%d, payload=%.*s",
+        CALL_TOPIC,
+        CALL_QOS,
+        queued_message_id,
+        static_cast<int>(payload_length),
+        payload
+    );
+
+    return ESP_OK;
 }
