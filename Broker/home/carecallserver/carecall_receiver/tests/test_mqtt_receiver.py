@@ -9,10 +9,12 @@ import paho.mqtt.client as mqtt
 
 from event_database import EventDatabase
 from mqtt_receiver import (
+    ApplicationAckPublishError,
     MqttProtocolAckError,
     ReceiverRuntime,
     build_client,
     on_connect,
+    on_publish,
     process_message,
 )
 from receiver_config import (
@@ -37,8 +39,10 @@ class FakeClient:
     def __init__(
         self,
         ack_result=mqtt.MQTT_ERR_SUCCESS,
+        publish_result=mqtt.MQTT_ERR_SUCCESS,
     ) -> None:
         self.ack_result = ack_result
+        self.publish_result = publish_result
 
         self.ack_calls: list[
             tuple[int, int]
@@ -47,6 +51,12 @@ class FakeClient:
         self.subscribe_calls: list[
             tuple[str, int]
         ] = []
+
+        self.publish_calls: list[
+            dict[str, object]
+        ] = []
+
+        self.next_publish_mid = 100
 
     def ack(
         self,
@@ -69,6 +79,31 @@ class FakeClient:
         )
 
         return mqtt.MQTT_ERR_SUCCESS, 77
+
+    def publish(
+        self,
+        topic: str,
+        payload: str,
+        qos: int,
+        retain: bool,
+    ):
+        message_id = self.next_publish_mid
+        self.next_publish_mid += 1
+
+        self.publish_calls.append(
+            {
+                "topic": topic,
+                "payload": payload,
+                "qos": qos,
+                "retain": retain,
+                "mid": message_id,
+            }
+        )
+
+        return SimpleNamespace(
+            rc=self.publish_result,
+            mid=message_id,
+        )
 
 
 class FailingDatabase:
@@ -104,7 +139,10 @@ class MqttReceiverTests(unittest.TestCase):
         self.previous_logging_disable_level = (
             logging.root.manager.disable
         )
-        logging.disable(logging.CRITICAL)
+
+        logging.disable(
+            logging.CRITICAL
+        )
 
         self.temporary_directory = (
             tempfile.TemporaryDirectory()
@@ -155,9 +193,39 @@ class MqttReceiverTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(stored)
+
+        self.assertEqual(
+            client.publish_calls,
+            [
+                {
+                    "topic": (
+                        "carecall/v1/devices/"
+                        "button01/ack"
+                    ),
+                    "payload": (
+                        '{"event_id":'
+                        '"button01-test-00000001",'
+                        '"device_id":"button01",'
+                        '"status":"stored"}'
+                    ),
+                    "qos": 1,
+                    "retain": False,
+                    "mid": 100,
+                }
+            ],
+        )
+
         self.assertEqual(
             client.ack_calls,
             [(10, 1)],
+        )
+
+        self.assertEqual(
+            self.runtime.pending_application_acks,
+            {
+                100:
+                    "button01-test-00000001"
+            },
         )
 
     def test_duplicate_message_increments_count_and_is_acked(
@@ -197,6 +265,10 @@ class MqttReceiverTests(unittest.TestCase):
             2,
         )
         self.assertEqual(
+            len(client.publish_calls),
+            2,
+        )
+        self.assertEqual(
             client.ack_calls,
             [
                 (10, 1),
@@ -220,6 +292,10 @@ class MqttReceiverTests(unittest.TestCase):
             0,
         )
         self.assertEqual(
+            client.publish_calls,
+            [],
+        )
+        self.assertEqual(
             client.ack_calls,
             [(10, 1)],
         )
@@ -240,6 +316,10 @@ class MqttReceiverTests(unittest.TestCase):
             0,
         )
         self.assertEqual(
+            client.publish_calls,
+            [],
+        )
+        self.assertEqual(
             client.ack_calls,
             [(10, 1)],
         )
@@ -258,6 +338,10 @@ class MqttReceiverTests(unittest.TestCase):
         self.assertEqual(
             self.database.count_events(),
             0,
+        )
+        self.assertEqual(
+            client.publish_calls,
+            [],
         )
         self.assertEqual(
             client.ack_calls,
@@ -308,6 +392,10 @@ class MqttReceiverTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
+            len(client.publish_calls),
+            1,
+        )
+        self.assertEqual(
             client.ack_calls,
             [
                 (10, 1),
@@ -338,6 +426,41 @@ class MqttReceiverTests(unittest.TestCase):
             client.ack_calls,
             [],
         )
+        self.assertEqual(
+            client.publish_calls,
+            [],
+        )
+
+    def test_application_ack_publish_failure_leaves_incoming_unacknowledged(
+        self,
+    ) -> None:
+        client = FakeClient(
+            publish_result=(
+                mqtt.MQTT_ERR_NO_CONN
+            )
+        )
+
+        with self.assertRaises(
+            ApplicationAckPublishError
+        ):
+            process_message(
+                client,
+                self.runtime,
+                make_message(),
+            )
+
+        self.assertEqual(
+            self.database.count_events(),
+            1,
+        )
+        self.assertEqual(
+            len(client.publish_calls),
+            1,
+        )
+        self.assertEqual(
+            client.ack_calls,
+            [],
+        )
 
     def test_ack_failure_is_raised_after_database_commit(
         self,
@@ -360,8 +483,34 @@ class MqttReceiverTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
+            len(client.publish_calls),
+            1,
+        )
+        self.assertEqual(
             client.ack_calls,
             [(10, 1)],
+        )
+
+    def test_on_publish_removes_pending_application_ack(
+        self,
+    ) -> None:
+        client = FakeClient()
+
+        self.runtime.pending_application_acks[
+            100
+        ] = "button01-test-00000001"
+
+        on_publish(
+            client,
+            self.runtime,
+            100,
+            0,
+            None,
+        )
+
+        self.assertEqual(
+            self.runtime.pending_application_acks,
+            {},
         )
 
     def test_on_connect_subscribes_after_success(
@@ -440,6 +589,10 @@ class MqttReceiverTests(unittest.TestCase):
         self.assertIs(
             client.on_connect,
             on_connect,
+        )
+        self.assertIs(
+            client.on_publish,
+            on_publish,
         )
 
 
