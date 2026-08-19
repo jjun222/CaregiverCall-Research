@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import logging
 import sys
 
@@ -31,10 +32,17 @@ class MqttProtocolAckError(RuntimeError):
     """Paho could not queue an MQTT protocol ACK."""
 
 
+class ApplicationAckPublishError(RuntimeError):
+    """An Application ACK could not be published."""
+
+
 @dataclass(slots=True)
 class ReceiverRuntime:
     config: ReceiverConfig
     database: EventDatabase
+    pending_application_acks: dict[int, str] = field(
+        default_factory=dict
+    )
 
 
 def _require_runtime(
@@ -55,7 +63,6 @@ def _ack_message(
     client: mqtt.Client,
     message: mqtt.MQTTMessage,
 ) -> None:
-    # QoS 0에는 전송할 MQTT ACK가 없다.
     if message.qos == 0:
         return
 
@@ -90,6 +97,59 @@ def _envelope_rejection_reason(
     return None
 
 
+def _queue_application_ack(
+    client: mqtt.Client,
+    runtime: ReceiverRuntime,
+    event_id: str,
+    device_id: str,
+) -> int:
+    topic = (
+        f"carecall/v1/devices/{device_id}/ack"
+    )
+
+    payload = json.dumps(
+        {
+            "event_id": event_id,
+            "device_id": device_id,
+            "status": "stored",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    publish_info = client.publish(
+        topic,
+        payload=payload,
+        qos=1,
+        retain=False,
+    )
+
+    if (
+        publish_info.rc
+        != mqtt.MQTT_ERR_SUCCESS
+    ):
+        raise ApplicationAckPublishError(
+            "failed to queue Application ACK: "
+            f"event_id={event_id} "
+            f"result={publish_info.rc}"
+        )
+
+    runtime.pending_application_acks[
+        publish_info.mid
+    ] = event_id
+
+    LOGGER.info(
+        "Application ACK queued "
+        "event_id=%s topic=%s mid=%s "
+        "qos=1 retain=false",
+        event_id,
+        topic,
+        publish_info.mid,
+    )
+
+    return publish_info.mid
+
+
 def process_message(
     client: mqtt.Client,
     runtime: ReceiverRuntime,
@@ -97,7 +157,8 @@ def process_message(
 ) -> None:
     LOGGER.info(
         "MQTT message received "
-        "topic=%s mid=%s qos=%s dup=%s retain=%s",
+        "topic=%s mid=%s qos=%s "
+        "dup=%s retain=%s",
         message.topic,
         message.mid,
         message.qos,
@@ -139,7 +200,7 @@ def process_message(
             exc,
         )
 
-        # 잘못된 메시지가 계속 재전달되는 것을 막는다.
+        # 잘못된 메시지의 반복 전달을 막는다.
         _ack_message(
             client,
             message,
@@ -161,7 +222,7 @@ def process_message(
             exc,
         )
 
-        # 기존 데이터는 보존하고 충돌 메시지만 종료한다.
+        # 충돌 메시지에는 Application ACK를 보내지 않는다.
         _ack_message(
             client,
             message,
@@ -176,12 +237,31 @@ def process_message(
             message.mid,
             call.event_id,
         )
-
-        # DB 저장 실패 시 ACK하지 않는다.
-        # 예외를 상위로 전달해 Receiver를 실패 처리한다.
         raise
 
-    # save_call() 내부 COMMIT이 완료된 뒤 호출된다.
+    try:
+        # SQLite COMMIT 완료 후 Application ACK를 큐에 넣는다.
+        application_ack_mid = (
+            _queue_application_ack(
+                client,
+                runtime,
+                event_id=call.event_id,
+                device_id=call.device_id,
+            )
+        )
+
+    except Exception:
+        LOGGER.exception(
+            "Application ACK queue failed; "
+            "incoming MQTT message left "
+            "unacknowledged "
+            "mid=%s event_id=%s",
+            message.mid,
+            call.event_id,
+        )
+        raise
+
+    # Application ACK 큐 성공 후 수신 PUBLISH를 확인한다.
     _ack_message(
         client,
         message,
@@ -189,17 +269,20 @@ def process_message(
 
     log_message = (
         "Call event stored"
-        if save_result.outcome is SaveOutcome.STORED
+        if save_result.outcome
+        is SaveOutcome.STORED
         else "Duplicate call event recorded"
     )
 
     LOGGER.info(
         "%s event_id=%s delivery_count=%s "
-        "mid=%s mqtt_ack=sent",
+        "mid=%s mqtt_ack=sent "
+        "application_ack_mid=%s",
         log_message,
         save_result.event_id,
         save_result.delivery_count,
         message.mid,
+        application_ack_mid,
     )
 
 
@@ -221,7 +304,6 @@ def on_connect(
         )
         return
 
-    # 최초 연결과 재연결 모두 다시 구독한다.
     result, message_id = client.subscribe(
         runtime.config.mqtt_topic_filter,
         qos=runtime.config.mqtt_qos,
@@ -320,6 +402,50 @@ def on_subscribe(
     )
 
 
+def on_publish(
+    client: mqtt.Client,
+    userdata: object,
+    message_id: int,
+    reason_code: mqtt.ReasonCode,
+    properties: mqtt.Properties | None,
+) -> None:
+    del client, properties
+
+    runtime = _require_runtime(userdata)
+
+    event_id = (
+        runtime.pending_application_acks.pop(
+            message_id,
+            None,
+        )
+    )
+
+    if event_id is None:
+        LOGGER.warning(
+            "PUBACK received for unknown "
+            "outgoing message "
+            "mid=%s reason=%s",
+            message_id,
+            reason_code,
+        )
+        return
+
+    if reason_code != 0:
+        raise ApplicationAckPublishError(
+            "Application ACK publish failed: "
+            f"event_id={event_id} "
+            f"mid={message_id} "
+            f"reason={reason_code}"
+        )
+
+    LOGGER.info(
+        "Application ACK PUBACK received "
+        "event_id=%s mid=%s",
+        event_id,
+        message_id,
+    )
+
+
 def on_message(
     client: mqtt.Client,
     userdata: object,
@@ -365,6 +491,7 @@ def build_client(
     client.on_connect_fail = on_connect_fail
     client.on_disconnect = on_disconnect
     client.on_subscribe = on_subscribe
+    client.on_publish = on_publish
     client.on_message = on_message
 
     return client
