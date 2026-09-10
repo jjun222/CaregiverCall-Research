@@ -10,6 +10,7 @@ from pathlib import Path
 import sqlite3
 
 from message_validator import ValidatedCall
+from notification_store import OUTBOX_SCHEMA_SQL, enqueue_notifications
 
 
 SCHEMA_SQL = """
@@ -141,6 +142,7 @@ class EventDatabase:
                 "PRAGMA journal_mode = WAL"
             )
             connection.executescript(SCHEMA_SQL)
+            connection.executescript(OUTBOX_SCHEMA_SQL)
 
     def save_call(
         self,
@@ -203,6 +205,9 @@ class EventDatabase:
                         ),
                     )
 
+                    # 같은 트랜잭션: 새 호출과 승인된 수신자의 발송 작업을 함께 저장.
+                    # 기존 호출/중복 전달에는 소급하여 알림을 만들지 않는다.
+                    enqueue_notifications(connection, call.event_id, call.device_id, timestamp)
                     connection.commit()
 
                     return SaveResult(
