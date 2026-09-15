@@ -9,7 +9,7 @@ import time
 import warnings
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from guardian_store import GuardianStore
+from operator_store import OperatorStore as GuardianStore
 from telegram_worker import DATABASE_PATH
 
 def main():
