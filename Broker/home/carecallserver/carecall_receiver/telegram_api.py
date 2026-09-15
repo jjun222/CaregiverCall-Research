@@ -7,7 +7,7 @@ import ssl
 import urllib.error
 import urllib.request
 
-EXPECTED_BOT = " "
+EXPECTED_BOT = "carecall_research_alert_bot"
 
 class TelegramError(RuntimeError):
     def __init__(self, code, *, retryable=False, retry_after=0, fatal=False):
@@ -40,7 +40,7 @@ class TelegramClient:
                             retry_after=delay, fatal=(code == 401)) from None
 
     def request(self, method, payload=None):
-        if method not in {'getMe', 'getChat', 'sendMessage', 'getUpdates', 'getWebhookInfo'}:
+        if method not in {'getMe', 'getChat', 'sendMessage', 'getUpdates', 'getWebhookInfo', 'answerCallbackQuery'}:
             raise ValueError("Unsupported method")
         request = urllib.request.Request(
             f"https://api.telegram.org/bot{self._token}/{method}",
@@ -69,6 +69,10 @@ class TelegramClient:
             raise TelegramError("invalid_api_response", retryable=True)
         if body.get('ok') is not True:
             self._raise_api_error(body.get('error_code'), body)
+        if method == 'answerCallbackQuery':
+            if body.get('result') is not True:
+                raise TelegramError('invalid_api_result', retryable=True)
+            return True
         if not isinstance(body.get('result'), list if method == 'getUpdates' else dict):
             raise TelegramError("invalid_api_result", retryable=True)
         return body['result']
@@ -85,12 +89,15 @@ class TelegramClient:
         if chat.get('type') != 'private' or chat.get('id') != chat_id:
             raise TelegramError("unexpected_private_chat", fatal=True)
 
-    def send(self, chat_id, text):
-        result = self.request('sendMessage', {
+    def send(self, chat_id, text, *, reply_markup=None):
+        payload = {
             'chat_id': chat_id, 'text': text,
             'disable_notification': False,
             'link_preview_options': {'is_disabled': True},
-        })
+        }
+        if reply_markup is not None:
+            payload['reply_markup'] = reply_markup
+        result = self.request('sendMessage', payload)
         message_id = result.get('message_id')
         if (result.get('chat', {}).get('id') != chat_id or
                 type(message_id) is not int or message_id <= 0):
