@@ -1,6 +1,6 @@
 """Local-admin invitations. A deep link creates a request, never a recipient."""
 from __future__ import annotations
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import hmac
 import json
@@ -60,19 +60,27 @@ def valid_chat(value):
     return type(value) is int and 0 < value < 2**52
 
 class GuardianStore(NotificationStore):
+    @contextmanager
+    def transaction(self, connection=None):
+        if connection is not None:
+            yield connection
+        else:
+            with closing(self.connect()) as c, c:
+                c.execute('BEGIN IMMEDIATE')
+                yield c
+
     def migrate(self):
         with closing(self.connect()) as c:
             c.executescript('BEGIN IMMEDIATE;\n' + SCHEMA + '\nCOMMIT;')
 
-    def invite(self, label, minutes=15, now=None):
+    def invite(self, label, minutes=15, now=None, *, connection=None):
         now = time.time() if now is None else now
         if not label or len(label) > 40 or any(not x.isprintable() for x in label):
             raise ValueError('Use a printable recipient label of 1-40 characters')
         if type(minutes) is not int or not 1 <= minutes <= 60:
             raise ValueError('Expiry must be 1-60 minutes')
         token = secrets.token_urlsafe(32)
-        with closing(self.connect()) as c, c:
-            c.execute('BEGIN IMMEDIATE')
+        with self.transaction(connection) as c:
             row = c.execute('''INSERT INTO guardian_invites
                 (token_hash,device_id,label,created_at,expires_at,state)
                 VALUES(?,'button01',?,?,?,'issued')''',
@@ -100,14 +108,13 @@ class GuardianStore(NotificationStore):
             (dedupe_key,invite_id,chat_id,text,created_at,expires_at)
             VALUES(?,?,?,?,?,?)''', (key,invite_id,chat_id,text,now,expiry or now+3600))
 
-    def apply_update(self, update, now=None):
+    def apply_update(self, update, now=None, *, connection=None):
         """Commit request/reply and update cursor together, then acknowledge by offset."""
         now = time.time() if now is None else now
         update_id = update.get('update_id')
         if type(update_id) is not int or update_id < 0:
             raise ValueError('invalid_update_id')
-        with closing(self.connect()) as c, c:
-            c.execute('BEGIN IMMEDIATE')
+        with self.transaction(connection) as c:
             last = c.execute('SELECT last_update_id FROM guardian_cursor WHERE singleton=1').fetchone()[0]
             if update_id <= last:
                 return 'replayed'
@@ -162,10 +169,9 @@ class GuardianStore(NotificationStore):
             c.execute('UPDATE guardian_cursor SET last_update_id=?,last_update_at=? WHERE singleton=1', (update_id,now))
             return outcome
 
-    def approve(self, request_id, code, now=None):
+    def approve(self, request_id, code, now=None, *, connection=None):
         now = time.time() if now is None else now
-        with closing(self.connect()) as c, c:
-            c.execute('BEGIN IMMEDIATE')
+        with self.transaction(connection) as c:
             row = c.execute('SELECT * FROM guardian_invites WHERE id=?', (request_id,)).fetchone()
             if not row or row['state'] != 'pending' or row['expires_at'] <= now:
                 raise ValueError('Request is not pending or has expired')
