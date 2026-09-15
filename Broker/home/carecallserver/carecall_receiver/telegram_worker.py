@@ -12,6 +12,7 @@ import threading
 import time
 from zoneinfo import ZoneInfo
 
+from delivery_gate import delivery_gate
 from notification_store import NotificationStore
 from telegram_api import TelegramClient, TelegramError
 
@@ -45,6 +46,10 @@ def retry_delay(attempts, retry_after=0):
     return max(min(300, 5 * 2**min(max(attempts - 1, 0), 6)), retry_after)
 
 def process_one(store, client, now=None):
+    with delivery_gate(store.path):
+        return _process_one_locked(store, client, now)
+
+def _process_one_locked(store, client, now=None):
     job = store.claim(now)
     if job is None:
         return 1.0
