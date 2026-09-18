@@ -1,153 +1,307 @@
 #include "call_manager.h"
 
-#include <atomic>
 #include <cinttypes>
-#include <cstddef>
-#include <cstdint>
 #include <cstdio>
+#include <cstring>
 
+#include "call_outbox.h"
+#include "cJSON.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "mqtt_manager.h"
+#include "nvs_flash.h"
 #include "sdkconfig.h"
 
 namespace {
 
 constexpr char TAG[] = "CALL";
+constexpr std::int64_t RETRY_US = 10 * 1000 * 1000;
+constexpr std::size_t MAX_ACK_SIZE = 512;
 
-constexpr std::size_t EVENT_ID_BUFFER_SIZE = 96;
-constexpr std::size_t JSON_BUFFER_SIZE = 320;
+struct DatabaseAck {
+    char event_id[CallOutbox::EVENT_ID_SIZE];
+};
 
-std::atomic_uint32_t g_sequence{0};
-uint64_t g_boot_identifier = 0;
+CallOutbox g_outbox;
+SemaphoreHandle_t g_mutex = nullptr;
+QueueHandle_t g_acks = nullptr;
+TaskHandle_t g_task = nullptr;
 
-uint32_t next_sequence()
+void delivery_task(void*)
 {
-    uint32_t sequence =
-        g_sequence.fetch_add(1) + 1;
+    char last_attempt_id[CallOutbox::EVENT_ID_SIZE]{};
+    std::int64_t retry_at = 0;
 
-    // 32비트 순번이 한 바퀴 돌아 0이 된 경우 0을 건너뜁니다.
-    if (sequence == 0) {
-        sequence = g_sequence.fetch_add(1) + 1;
-    }
+    while (true) {
+        DatabaseAck ack{};
 
-    return sequence;
-}
+        while (xQueueReceive(g_acks, &ack, 0) == pdTRUE) {
+            xSemaphoreTake(g_mutex, portMAX_DELAY);
+            const esp_err_t result =
+                g_outbox.acknowledge_stored(ack.event_id);
+            xSemaphoreGive(g_mutex);
 
-uint64_t get_boot_identifier()
-{
-    if (g_boot_identifier == 0) {
-        do {
-            esp_fill_random(
-                &g_boot_identifier,
-                sizeof(g_boot_identifier)
+            if (result == ESP_OK) {
+                ESP_LOGI(
+                    TAG,
+                    "Pi database storage confirmed: event_id=%s",
+                    ack.event_id
+                );
+            } else if (result != ESP_ERR_NOT_FOUND) {
+                ESP_LOGE(
+                    TAG,
+                    "Failed to persist database ACK: %s",
+                    esp_err_to_name(result)
+                );
+            }
+        }
+
+        StoredCall call{};
+        char event_id[CallOutbox::EVENT_ID_SIZE]{};
+
+        xSemaphoreTake(g_mutex, portMAX_DELAY);
+        const bool pending = g_outbox.front(&call);
+
+        if (pending) {
+            g_outbox.event_id(call, event_id);
+        }
+
+        xSemaphoreGive(g_mutex);
+
+        TickType_t wait = portMAX_DELAY;
+
+        if (pending && mqtt_manager_is_ready_to_publish()) {
+            if (std::strcmp(last_attempt_id, event_id) != 0) {
+                retry_at = 0;
+            }
+
+            const std::int64_t now = esp_timer_get_time();
+
+            if (now >= retry_at) {
+                char payload[320]{};
+
+                const int length = std::snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{\"schema_version\":1,\"event_id\":\"%s\","
+                    "\"device_id\":\"%s\",\"event_type\":\"care_call\","
+                    "\"sequence\":%" PRIu32 ",\"uptime_ms\":%" PRIu64 "}",
+                    event_id,
+                    CONFIG_CARECALL_DEVICE_ID,
+                    call.sequence,
+                    call.uptime_ms
+                );
+
+                int message_id = -1;
+
+                if (length > 0 &&
+                    static_cast<std::size_t>(length) < sizeof(payload)) {
+                    const esp_err_t result = mqtt_manager_publish_call(
+                        payload,
+                        static_cast<std::size_t>(length),
+                        &message_id
+                    );
+
+                    if (result != ESP_OK) {
+                        ESP_LOGW(
+                            TAG,
+                            "Stored call will be retried: %s",
+                            esp_err_to_name(result)
+                        );
+                    }
+                }
+
+                std::strcpy(last_attempt_id, event_id);
+                retry_at = now + RETRY_US;
+            }
+
+            const auto remaining_ms =
+                (retry_at - esp_timer_get_time()) / 1000;
+
+            wait = pdMS_TO_TICKS(
+                remaining_ms > 0 ? remaining_ms + 1 : 1
             );
-        } while (g_boot_identifier == 0);
+
+            if (wait == 0) {
+                wait = 1;
+            }
+        } else {
+            // 오프라인에서는 이 작업이 주기적으로 깨어나지 않습니다.
+            last_attempt_id[0] = '\0';
+            retry_at = 0;
+        }
+
+        ulTaskNotifyTake(pdTRUE, wait);
     }
-
-    return g_boot_identifier;
-}
-
-bool format_was_successful(
-    const int written,
-    const std::size_t buffer_size
-)
-{
-    return written >= 0 &&
-           static_cast<std::size_t>(written) < buffer_size;
 }
 
 }  // namespace
 
-esp_err_t call_manager_request_call()
+esp_err_t call_manager_init()
 {
-    if (!mqtt_manager_is_connected()) {
-        ESP_LOGW(
-            TAG,
-            "Call request rejected: MQTT is not connected"
-        );
-        return ESP_ERR_INVALID_STATE;
+    if (g_task != nullptr) {
+        return ESP_OK;
     }
 
-    const uint32_t sequence = next_sequence();
-    const uint64_t boot_identifier = get_boot_identifier();
+    esp_err_t result = nvs_flash_init();
 
-    const uint64_t uptime_ms =
-        static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
-
-    char event_id[EVENT_ID_BUFFER_SIZE]{};
-
-    const int event_id_length = std::snprintf(
-        event_id,
-        sizeof(event_id),
-        "%s-%016" PRIx64 "-%08" PRIu32,
-        CONFIG_CARECALL_DEVICE_ID,
-        boot_identifier,
-        sequence
-    );
-
-    if (!format_was_successful(
-            event_id_length,
-            sizeof(event_id))) {
-
-        ESP_LOGE(TAG, "Failed to create event_id");
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    char json_payload[JSON_BUFFER_SIZE]{};
-
-    const int payload_length = std::snprintf(
-        json_payload,
-        sizeof(json_payload),
-        "{\"schema_version\":1,"
-        "\"event_id\":\"%s\","
-        "\"device_id\":\"%s\","
-        "\"event_type\":\"care_call\","
-        "\"sequence\":%" PRIu32 ","
-        "\"uptime_ms\":%" PRIu64 "}",
-        event_id,
-        CONFIG_CARECALL_DEVICE_ID,
-        sequence,
-        uptime_ms
-    );
-
-    if (!format_was_successful(
-            payload_length,
-            sizeof(json_payload))) {
-
-        ESP_LOGE(TAG, "Failed to create call JSON");
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    int mqtt_message_id = -1;
-
-    const esp_err_t publish_result =
-        mqtt_manager_publish_call(
-            json_payload,
-            static_cast<std::size_t>(payload_length),
-            &mqtt_message_id
-        );
-
-    if (publish_result != ESP_OK) {
+    if (result != ESP_OK) {
         ESP_LOGE(
             TAG,
-            "Call publish request failed: event_id=%s, error=%s",
-            event_id,
-            esp_err_to_name(publish_result)
+            "NVS initialization failed; saved calls were not erased: %s",
+            esp_err_to_name(result)
         );
-        return publish_result;
+        return result;
+    }
+
+    std::uint64_t seed = 0;
+    esp_fill_random(&seed, sizeof(seed));
+
+    result = g_outbox.open(CONFIG_CARECALL_DEVICE_ID, seed);
+
+    if (result != ESP_OK) {
+        return result;
+    }
+
+    g_mutex = xSemaphoreCreateMutex();
+    g_acks = xQueueCreate(8, sizeof(DatabaseAck));
+
+    if (g_mutex == nullptr || g_acks == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreate(
+            delivery_task,
+            "call_delivery",
+            6144,
+            nullptr,
+            4,
+            &g_task
+        ) != pdPASS) {
+        return ESP_ERR_NO_MEM;
     }
 
     ESP_LOGI(
         TAG,
-        "Call request queued: event_id=%s, sequence=%" PRIu32
-        ", uptime_ms=%" PRIu64 ", mqtt_message_id=%d",
-        event_id,
-        sequence,
-        uptime_ms,
-        mqtt_message_id
+        "Persistent call outbox ready: restored=%u, capacity=%u",
+        static_cast<unsigned>(g_outbox.size()),
+        static_cast<unsigned>(CallOutbox::CAPACITY)
     );
 
     return ESP_OK;
+}
+
+esp_err_t call_manager_request_call()
+{
+    if (g_task == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    StoredCall accepted{};
+    char event_id[CallOutbox::EVENT_ID_SIZE]{};
+
+    xSemaphoreTake(g_mutex, portMAX_DELAY);
+
+    const esp_err_t result = g_outbox.append(
+        static_cast<std::uint64_t>(esp_timer_get_time()) / 1000,
+        &accepted
+    );
+
+    if (result == ESP_OK) {
+        g_outbox.event_id(accepted, event_id);
+    }
+
+    xSemaphoreGive(g_mutex);
+
+    if (result == ESP_OK) {
+        // 추후 LED 점등은 영구 저장에 성공한 이 지점과 연결합니다.
+        // MQTT PUBACK이나 Pi 저장 ACK로 LED를 끄면 안 됩니다.
+        ESP_LOGI(
+            TAG,
+            "Call durably accepted: event_id=%s",
+            event_id
+        );
+
+        xTaskNotifyGive(g_task);
+    } else {
+        ESP_LOGE(
+            TAG,
+            "Call not accepted; outbox full or storage unavailable: %s",
+            esp_err_to_name(result)
+        );
+    }
+
+    return result;
+}
+
+void call_manager_notify_transport_changed()
+{
+    if (g_task != nullptr) {
+        xTaskNotifyGive(g_task);
+    }
+}
+
+void call_manager_receive_database_ack(
+    const char* payload,
+    std::size_t length
+)
+{
+    if (g_acks == nullptr ||
+        payload == nullptr ||
+        length == 0 ||
+        length > MAX_ACK_SIZE) {
+        return;
+    }
+
+    char text[MAX_ACK_SIZE + 1]{};
+    std::memcpy(text, payload, length);
+
+    if (std::memchr(text, '\0', length) != nullptr) {
+        return;
+    }
+
+    cJSON* root = cJSON_ParseWithLengthOpts(
+        text,
+        length + 1,
+        nullptr,
+        true
+    );
+
+    if (root == nullptr) {
+        return;
+    }
+
+    const cJSON* id =
+        cJSON_GetObjectItemCaseSensitive(root, "event_id");
+    const cJSON* device =
+        cJSON_GetObjectItemCaseSensitive(root, "device_id");
+    const cJSON* status =
+        cJSON_GetObjectItemCaseSensitive(root, "status");
+
+    if (cJSON_IsObject(root) &&
+        cJSON_GetArraySize(root) == 3 &&
+        cJSON_IsString(id) &&
+        cJSON_IsString(device) &&
+        cJSON_IsString(status) &&
+        std::strlen(id->valuestring) > 0 &&
+        std::strlen(id->valuestring) < CallOutbox::EVENT_ID_SIZE &&
+        std::strcmp(device->valuestring, CONFIG_CARECALL_DEVICE_ID) == 0 &&
+        std::strcmp(status->valuestring, "stored") == 0) {
+        DatabaseAck ack{};
+        std::strcpy(ack.event_id, id->valuestring);
+
+        if (xQueueSend(g_acks, &ack, 0) == pdTRUE) {
+            call_manager_notify_transport_changed();
+        }
+
+        // ACK 처리 큐가 가득 차도 호출은 삭제하지 않습니다.
+        // 같은 호출 재시도 후 다시 ACK를 받을 수 있습니다.
+    }
+
+    cJSON_Delete(root);
 }
