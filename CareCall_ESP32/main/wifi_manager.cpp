@@ -163,29 +163,8 @@ esp_err_t initialize_nvs()
 {
     esp_err_t result = nvs_flash_init();
 
-    if (result == ESP_ERR_NVS_NO_FREE_PAGES ||
-        result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-
-        ESP_LOGW(
-            TAG,
-            "NVS requires erase before reinitialization: %s",
-            esp_err_to_name(result)
-        );
-
-        result = nvs_flash_erase();
-
-        if (result != ESP_OK) {
-            ESP_LOGE(
-                TAG,
-                "Failed to erase NVS: %s",
-                esp_err_to_name(result)
-            );
-            return result;
-        }
-
-        result = nvs_flash_init();
-    }
-
+    // 미전송 호출도 저장되어 있으므로
+    // 초기화 오류를 이유로 NVS 전체를 자동 삭제하지 않습니다.
     if (result != ESP_OK) {
         ESP_LOGE(
             TAG,
