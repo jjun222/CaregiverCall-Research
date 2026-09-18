@@ -1,10 +1,18 @@
 #pragma once
 
+#include <cstddef>
+
 #include "esp_err.h"
 
-/**
- * @brief 호출 버튼 한 번에 대응하는 호출 JSON을 생성하고 MQTT 발행을 요청합니다.
- *
- * MQTT에 연결되지 않은 경우에는 호출을 생성하거나 발행하지 않습니다.
- */
+// 버튼을 활성화하기 전에 호출합니다.
+esp_err_t call_manager_init();
+
+// 성공은 ESP32 내부 저장 완료를 의미합니다.
 esp_err_t call_manager_request_call();
+
+void call_manager_notify_transport_changed();
+
+void call_manager_receive_database_ack(
+    const char* payload,
+    std::size_t length
+);
