@@ -1,4 +1,5 @@
 #include "mqtt_manager.h"
+#include "call_manager.h"
 
 #include <atomic>
 #include <climits>
@@ -46,6 +47,8 @@ esp_mqtt_client_handle_t g_mqtt_client = nullptr;
 TaskHandle_t g_mqtt_manager_task = nullptr;
 
 std::atomic_bool g_connected{false};
+std::atomic_bool g_ack_subscribed{false};
+int g_ack_subscription_id = -1;
 std::atomic_bool g_initialized{false};
 
 bool is_valid_device_id(const char* device_id)
@@ -171,18 +174,19 @@ void mqtt_event_handler(
     }
 
     switch (static_cast<esp_mqtt_event_id_t>(event_id)) {
-
         case MQTT_EVENT_CONNECTED: {
             g_connected.store(true);
+            g_ack_subscribed.store(false);
 
             ESP_LOGI(TAG, "Connected to MQTT Broker");
 
-            const int message_id =
-                esp_mqtt_client_subscribe(
-                    event->client,
-                    ACK_TOPIC,
-                    ACK_QOS
-                );
+            const int message_id = esp_mqtt_client_subscribe(
+                event->client,
+                ACK_TOPIC,
+                ACK_QOS
+            );
+
+            g_ack_subscription_id = message_id;
 
             if (message_id < 0) {
                 ESP_LOGE(
@@ -190,6 +194,8 @@ void mqtt_event_handler(
                     "ACK subscription request failed: result=%d",
                     message_id
                 );
+
+                esp_mqtt_client_disconnect(event->client);
             } else {
                 ESP_LOGI(
                     TAG,
@@ -206,6 +212,8 @@ void mqtt_event_handler(
 
         case MQTT_EVENT_DISCONNECTED:
             g_connected.store(false);
+            g_ack_subscribed.store(false);
+            call_manager_notify_transport_changed();
 
             ESP_LOGW(
                 TAG,
@@ -217,6 +225,27 @@ void mqtt_event_handler(
             break;
 
         case MQTT_EVENT_SUBSCRIBED:
+            if (event->msg_id == g_ack_subscription_id) {
+                // 단일 토픽을 QoS 1로 요청했습니다.
+                // 0x80 등 거절 응답은 성공으로 처리하지 않습니다.
+                const bool accepted =
+                    event->data != nullptr &&
+                    event->data_len == 1 &&
+                    static_cast<unsigned char>(event->data[0]) <= ACK_QOS;
+
+                g_ack_subscribed.store(accepted);
+                call_manager_notify_transport_changed();
+
+                if (!accepted) {
+                    ESP_LOGE(
+                        TAG,
+                        "ACK subscription rejected or malformed; reconnecting"
+                    );
+
+                    esp_mqtt_client_disconnect(event->client);
+                }
+            }
+
             ESP_LOGI(
                 TAG,
                 "MQTT SUBACK received: message_id=%d",
@@ -234,6 +263,17 @@ void mqtt_event_handler(
 
         case MQTT_EVENT_DATA:
             if (is_ack_topic(event)) {
+                // 완전한 ACK만 전달합니다.
+                // 불완전한 경우 호출을 보존하고 재시도합니다.
+                if (event->current_data_offset == 0 &&
+                    event->data_len == event->total_data_len &&
+                    event->data_len > 0) {
+                    call_manager_receive_database_ack(
+                        event->data,
+                        static_cast<std::size_t>(event->data_len)
+                    );
+                }
+
                 ESP_LOGI(
                     TAG,
                     "Application ACK received: "
@@ -255,6 +295,8 @@ void mqtt_event_handler(
 
         case MQTT_EVENT_ERROR:
             g_connected.store(false);
+            g_ack_subscribed.store(false);
+            call_manager_notify_transport_changed();
 
             if (event->error_handle == nullptr) {
                 ESP_LOGE(TAG, "MQTT error occurred");
@@ -263,11 +305,9 @@ void mqtt_event_handler(
 
             if (event->error_handle->error_type ==
                 MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
-
                 ESP_LOGE(
                     TAG,
-                    "Broker refused MQTT connection: "
-                    "return_code=%d",
+                    "Broker refused MQTT connection: return_code=%d",
                     static_cast<int>(
                         event->error_handle->connect_return_code
                     )
@@ -275,7 +315,6 @@ void mqtt_event_handler(
             } else if (
                 event->error_handle->error_type ==
                 MQTT_ERROR_TYPE_TCP_TRANSPORT) {
-
                 ESP_LOGE(
                     TAG,
                     "MQTT TCP transport error: "
@@ -618,6 +657,11 @@ bool mqtt_manager_is_connected()
     return g_connected.load();
 }
 
+bool mqtt_manager_is_ready_to_publish()
+{
+    return g_connected.load() && g_ack_subscribed.load();
+}
+
 esp_err_t mqtt_manager_publish_call(
     const char* payload,
     const std::size_t payload_length,
@@ -639,7 +683,7 @@ esp_err_t mqtt_manager_publish_call(
 
     if (!g_initialized.load() ||
         g_mqtt_client == nullptr ||
-        !g_connected.load()) {
+        !mqtt_manager_is_ready_to_publish()) {
 
         ESP_LOGW(
             TAG,
