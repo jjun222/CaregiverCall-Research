@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.cpp"
         "button_driver.cpp"
         "call_manager.cpp"
+        "call_outbox.cpp"
         "wifi_manager.cpp"
         "mqtt_manager.cpp"
 
@@ -15,6 +16,7 @@ idf_component_register(
         esp_event
         esp_netif
         nvs_flash
+        json
         mqtt
         esp_timer
         esp_hw_support
