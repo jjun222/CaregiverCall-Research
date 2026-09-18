@@ -43,6 +43,10 @@ extern "C" void app_main(void)
     );
 
     ESP_ERROR_CHECK(
+        call_manager_init()
+    );
+
+    ESP_ERROR_CHECK(
         button_driver_init(on_call_button_pressed)
     );
 
