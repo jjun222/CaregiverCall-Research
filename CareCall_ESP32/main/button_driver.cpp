@@ -108,7 +108,7 @@ esp_err_t button_driver_init(ButtonPressedCallback callback)
     const BaseType_t task_result = xTaskCreate(
         button_task,
         "button_task",
-        3072,
+        6144,
         nullptr,
         5,
         nullptr
