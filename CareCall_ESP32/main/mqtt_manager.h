@@ -16,6 +16,7 @@ esp_err_t mqtt_manager_init();
  */
 bool mqtt_manager_is_connected();
 
+bool mqtt_manager_is_ready_to_publish();
 /**
  * @brief 호출 JSON을 장치의 call 토픽으로 QoS 1 발행 큐에 넣습니다.
  *
