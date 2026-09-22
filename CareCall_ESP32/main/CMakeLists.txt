@@ -4,6 +4,7 @@ idf_component_register(
         "button_driver.cpp"
         "call_manager.cpp"
         "call_outbox.cpp"
+        "call_led.cpp"
         "wifi_manager.cpp"
         "mqtt_manager.cpp"
 
@@ -21,4 +22,5 @@ idf_component_register(
         esp_timer
         esp_hw_support
         espressif__mdns
+        espressif__led_strip
 )
