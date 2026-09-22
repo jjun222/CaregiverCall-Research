@@ -1,3 +1,23 @@
+menu "CareCall LED configuration"
+
+    config CARECALL_LED_GPIO
+        int "NeoPixel data GPIO (-1 disables physical output)"
+        range -1 21
+        default 2
+        help
+            GPIO2 connects to DI on one 16-pixel WS2812 ring. GPIO2 is a
+            strapping pin: hardware must satisfy reset/startup requirements.
+            Existing sdkconfig values override this default; verify menuconfig.
+            GPIO4 and native USB
+            GPIO18/19 are rejected. -1 allows confirmation testing without LEDs.
+
+    config CARECALL_LED_BRIGHTNESS
+        int "NeoPixel brightness (1-255)"
+        range 1 255
+        default 16
+
+endmenu
+
 menu "CareCall Wi-Fi configuration"
 
     config CARECALL_WIFI_SSID
