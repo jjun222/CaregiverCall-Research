@@ -18,6 +18,7 @@ from delivery_gate import delivery_gate
 from guardian_store import GuardianStore, valid_chat
 from notification_store import utc_now
 from operator_handover import HandoverMixin, HANDOVER_SCHEMA
+from confirmation_store import apply_callback as apply_call_callback
 
 BOT_LINK = 'https://t.me/carecall_research_alert_bot?start='
 TTL = 900
@@ -386,7 +387,9 @@ class OperatorStore(HandoverMixin, GuardianStore):
                 envelope = dict(query['message'])
                 envelope['from'] = query.get('from')
                 actor = private_actor(envelope)
-                if operator and actor == operator['chat_id']:
+                if isinstance(query.get('data'), str) and query['data'].startswith('c:'):
+                    outcome = apply_call_callback(c, query, actor)
+                elif operator and actor == operator['chat_id']:
                     outcome = self._callback(c, query, now) or 'operator'
             elif private_actor(message) and isinstance(message.get('text'), str) and len(message['text']) <= 150:
                 actor = private_actor(message)
