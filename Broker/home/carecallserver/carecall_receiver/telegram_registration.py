@@ -12,6 +12,13 @@ from telegram_worker import DATABASE_PATH, read_credential, retry_delay, worker_
 
 LOGGER = logging.getLogger('carecall_registration')
 
+CALL_ANSWERS = {
+    'call_confirmed': '확인을 접수했습니다. 기기에 전달합니다.',
+    'call_already_confirmed': '이미 확인한 호출입니다.',
+    'call_stale': '이후 호출이 있습니다. 최신 호출의 확인 버튼을 눌러주세요.',
+    'call_forbidden': '현재 이 호출을 확인할 수 없습니다.',
+}
+
 def send_reply(store, client):
     with delivery_gate(store.path):
         return _send_reply_locked(store, client)
@@ -83,7 +90,7 @@ def main():
                                 client.request('answerCallbackQuery', {
                                     'callback_query_id': query['id'],
                                     'show_alert': outcome == 'handover_complete',
-                                    'text': ('운영자 교체가 완료되었습니다. 이 계정의 운영 권한과 수신 등록은 해제되었습니다.'
+                                    'text': CALL_ANSWERS.get(outcome) or ('운영자 교체가 완료되었습니다. 이 계정의 운영 권한과 수신 등록은 해제되었습니다.'
                                              if outcome == 'handover_complete' else
                                              '대화방의 처리 결과를 확인해주세요.' if outcome == 'operator' else '사용할 수 없는 요청입니다.'),
                                 })
