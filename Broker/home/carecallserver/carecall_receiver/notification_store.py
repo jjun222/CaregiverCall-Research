@@ -113,7 +113,8 @@ class NotificationStore:
                 return job
 
     def finish(self, job_id, *, message_id=None, error=None, retry_at=None):
-        with closing(self.connect()) as connection:
+        with closing(self.connect()) as connection, connection:
+            connection.execute('BEGIN IMMEDIATE')
             if message_id is not None:
                 cursor = connection.execute("""UPDATE notification_outbox SET status='sent',
                     sent_at=?,telegram_message_id=?,last_error=NULL
@@ -127,3 +128,6 @@ class NotificationStore:
                      retry_at or 0, job_id))
             if cursor.rowcount != 1:
                 raise RuntimeError("Outbox state changed unexpectedly")
+            if message_id is not None:
+                from confirmation_store import register_message
+                register_message(connection, job_id)
