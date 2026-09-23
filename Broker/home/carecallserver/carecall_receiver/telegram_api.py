@@ -29,9 +29,12 @@ class TelegramClient:
         self._opener = opener or urllib.request.build_opener(
             urllib.request.HTTPSHandler(context=ssl.create_default_context()), NoRedirect())
 
-    def _raise_api_error(self, code, body):
+    def _raise_api_error(self, code, body, method=None):
         if type(code) is not int:
             raise TelegramError("invalid_api_response", retryable=True)
+        if (method == 'editMessageReplyMarkup' and code == 400
+                and 'message is not modified' in str(body.get('description', '')).lower()):
+            raise TelegramError('message_not_modified') from None
         parameters = body.get('parameters')
         delay = parameters.get('retry_after', 0) if isinstance(parameters, dict) else 0
         if type(delay) is not int or delay < 0:
@@ -40,7 +43,7 @@ class TelegramClient:
                             retry_after=delay, fatal=(code == 401)) from None
 
     def request(self, method, payload=None):
-        if method not in {'getMe', 'getChat', 'sendMessage', 'getUpdates', 'getWebhookInfo', 'answerCallbackQuery'}:
+        if method not in {'getMe', 'getChat', 'sendMessage', 'getUpdates', 'getWebhookInfo', 'answerCallbackQuery', 'editMessageReplyMarkup'}:
             raise ValueError("Unsupported method")
         request = urllib.request.Request(
             f"https://api.telegram.org/bot{self._token}/{method}",
@@ -61,14 +64,14 @@ class TelegramClient:
                 body = {}
             finally:
                 exc.close()
-            self._raise_api_error(exc.code, body)
+            self._raise_api_error(exc.code, body, method)
         except (OSError, ValueError):
             # A timeout during sendMessage does not prove that no message was sent.
             raise TelegramError("network_or_response_ambiguous", retryable=True) from None
         if not isinstance(body, dict):
             raise TelegramError("invalid_api_response", retryable=True)
         if body.get('ok') is not True:
-            self._raise_api_error(body.get('error_code'), body)
+            self._raise_api_error(body.get('error_code'), body, method)
         if method == 'answerCallbackQuery':
             if body.get('result') is not True:
                 raise TelegramError('invalid_api_result', retryable=True)
@@ -76,6 +79,12 @@ class TelegramClient:
         if not isinstance(body.get('result'), list if method == 'getUpdates' else dict):
             raise TelegramError("invalid_api_result", retryable=True)
         return body['result']
+
+    def edit_markup(self, chat_id, message_id, markup):
+        result = self.request('editMessageReplyMarkup', {
+            'chat_id': chat_id, 'message_id': message_id, 'reply_markup': markup})
+        if result.get('message_id') != message_id or result.get('chat', {}).get('id') != chat_id:
+            raise TelegramError('edit_result_ambiguous', retryable=True)
 
     def verify_bot(self):
         bot = self.request('getMe')
