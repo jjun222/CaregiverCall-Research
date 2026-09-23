@@ -1,0 +1,46 @@
+{
+  "baseline_commit": "c6848cd9404f4d3503a728eb72b3b960e789422e",
+  "original": {
+    "event_database.py": "6a0a9dfc196e8a7ec4cc0e44dcf9722aa64bc60ea70ce177fc73af02f16103f2",
+    "mqtt_receiver.py": "d0f8bf19162b403536d9d0b32e9371d19c53fe79b33f643c025ddd3b39790444",
+    "notification_store.py": "f4b23740a03041f155fb96fde64d56f89c90b0e7616c0ad0601cf9a0b27d1f41",
+    "operator_store.py": "0ee599e43d17fdd977687014b5aad503abc8cb85301a80e1b6813da356748142",
+    "telegram_api.py": "9b3da11e16b3991cc5103de759af8a78d55d08075d2c688421ac51e851bda9bf",
+    "telegram_registration.py": "8bbda44cc531493d9ec560e75522b95523e469b5dbc6b86b00f572ad6b76276b",
+    "telegram_worker.py": "33ad2c7c7adde3e0f23bf2fd6e7e99b03d4cd2d8b9e6eafa25c51d8fca9d9f83"
+  },
+  "dependencies": {
+    "guardian_store.py": "9163b33c5c364d887c530604f038e11f8f5f74809647c3f937a40684de7e49c2",
+    "operator_handover.py": "17db43c1ac538bcf1a81f7ef959b9f5cc0b7de73ca07de81890358d6049ee031",
+    "delivery_gate.py": "f2e9f3161a414890e4aa47b1fe1357deb61cf934619f7f0fc051d1983d4df74c",
+    "message_validator.py": "de5e2ed3cdaadaaefd2403d36be47737a368b24550770e2d3a9f3f7b3a0a68bd"
+  },
+  "release": {
+    "event_database.py": "654b86ae057689714414165e81f7ea1763701f328c04b97d69db3ccf15f097c9",
+    "mqtt_receiver.py": "8034544461d28403af9de12bf2599360ff113022ba1fddd8293fbc79bceefd94",
+    "notification_store.py": "d10ff1216fa25668d051e920c92dccf4b11af99cc700ef45f030dcaa9fa66186",
+    "operator_store.py": "68f9669eed89e01f6a668c895e05ecb2d4975aabcdc753a570b598afde008686",
+    "telegram_api.py": "7bda6eeb27feda98faa3e64f744f963fe289b00e0a87bf69431adf24bbc62b02",
+    "telegram_registration.py": "662cd9274d10503573c80ffb40b4637bdd8e7be94dbeafe06ca34046879a096b",
+    "telegram_worker.py": "bf1c8978438e863bfc109749faa96bcd87f3380694dbd3874446120975726935",
+    "confirmation_store.py": "a58f821146fbca7c9b071e12c7b350c6523ed73c83cbb304757a2d8463977233",
+    "confirmation_delivery.py": "bea1c996f71001ec4627e870308b52b0990b07490fb182f7d5c1a1a539adaee7"
+  },
+  "bundle": {
+    "confirmation_delivery.py": "bea1c996f71001ec4627e870308b52b0990b07490fb182f7d5c1a1a539adaee7",
+    "confirmation_store.py": "a58f821146fbca7c9b071e12c7b350c6523ed73c83cbb304757a2d8463977233",
+    "confirmation_tests/test_confirmation.py": "20d81994c3a749ffdbbb253eb5bab4f2381c2863cd3431d8f17384da0f340efb",
+    "delivery_gate.py": "f2e9f3161a414890e4aa47b1fe1357deb61cf934619f7f0fc051d1983d4df74c",
+    "event_database.py": "654b86ae057689714414165e81f7ea1763701f328c04b97d69db3ccf15f097c9",
+    "guardian_store.py": "9163b33c5c364d887c530604f038e11f8f5f74809647c3f937a40684de7e49c2",
+    "message_validator.py": "de5e2ed3cdaadaaefd2403d36be47737a368b24550770e2d3a9f3f7b3a0a68bd",
+    "mqtt_receiver.py": "8034544461d28403af9de12bf2599360ff113022ba1fddd8293fbc79bceefd94",
+    "notification_store.py": "d10ff1216fa25668d051e920c92dccf4b11af99cc700ef45f030dcaa9fa66186",
+    "operator_handover.py": "17db43c1ac538bcf1a81f7ef959b9f5cc0b7de73ca07de81890358d6049ee031",
+    "operator_store.py": "68f9669eed89e01f6a668c895e05ecb2d4975aabcdc753a570b598afde008686",
+    "telegram_api.py": "7bda6eeb27feda98faa3e64f744f963fe289b00e0a87bf69431adf24bbc62b02",
+    "telegram_registration.py": "662cd9274d10503573c80ffb40b4637bdd8e7be94dbeafe06ca34046879a096b",
+    "telegram_worker.py": "bf1c8978438e863bfc109749faa96bcd87f3380694dbd3874446120975726935",
+    "upgrade_confirmation.py": "6f6980c848a1530148c4622a633692521881e1fa2729ec40332a7c1930e6e971"
+  }
+}
