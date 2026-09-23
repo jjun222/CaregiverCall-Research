@@ -6,8 +6,11 @@ from dataclasses import dataclass, field
 import json
 import logging
 import sys
+import threading
 
 import paho.mqtt.client as mqtt
+from confirmation_store import ConfirmationStore
+from confirmation_delivery import pump_confirmations
 
 from event_database import (
     EventConflictError,
@@ -183,6 +186,18 @@ def process_message(
             client,
             message,
         )
+        return
+
+    try:
+        handled = ConfirmationStore(runtime.config.database_path).receive_device_result(
+            message.topic, message.payload)
+    except ValueError:
+        LOGGER.warning('Invalid guardian confirmation report')
+        _ack_message(client, message)
+        return
+    if handled:
+        _ack_message(client, message)
+        LOGGER.info('Device confirmation result stored')
         return
 
     try:
@@ -421,8 +436,10 @@ def on_publish(
     )
 
     if event_id is None:
-        LOGGER.warning(
-            "PUBACK received for unknown "
+        # Guardian confirmation publishes are tracked by a device result in DB,
+        # not broker PUBACK. Avoid a cross-thread publish/MID callback race.
+        LOGGER.debug(
+            "PUBACK received for untracked "
             "outgoing message "
             "mid=%s reason=%s",
             message_id,
@@ -537,9 +554,17 @@ def main() -> int:
             ),
         )
 
-        result = client.loop_forever(
-            retry_first_connection=True
-        )
+        confirmation_stopped = threading.Event()
+        confirmation_thread = threading.Thread(
+            target=pump_confirmations,
+            args=(client, client.user_data_get(), confirmation_stopped),
+            name='guardian-confirmation', daemon=True)
+        confirmation_thread.start()
+        try:
+            result = client.loop_forever(retry_first_connection=True)
+        finally:
+            confirmation_stopped.set()
+            confirmation_thread.join(timeout=2)
 
         if result != mqtt.MQTT_ERR_SUCCESS:
             LOGGER.error(
