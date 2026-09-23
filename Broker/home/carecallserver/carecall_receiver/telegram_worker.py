@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from delivery_gate import delivery_gate
 from notification_store import NotificationStore
+from confirmation_store import ConfirmationStore
 from telegram_api import TelegramClient, TelegramError
 
 LOGGER = logging.getLogger('carecall_telegram')
@@ -50,6 +51,35 @@ def process_one(store, client, now=None):
         return _process_one_locked(store, client, now)
 
 def _process_one_locked(store, client, now=None):
+    confirmation = ConfirmationStore(store.path)
+    markup_job = confirmation.next_markup(now)
+    if markup_job is not None:
+        markup = {'inline_keyboard': []}
+        if markup_job['desired'] == 'button':
+            markup = {'inline_keyboard': [[{'text': '확인했습니다.',
+                'callback_data': 'c:' + markup_job['token']}]]}
+        confirmation.begin_markup(markup_job)
+        try:
+            client.edit_markup(markup_job['chat_id'], markup_job['telegram_message_id'], markup)
+        except TelegramError as exc:
+            if exc.code == 'message_not_modified':
+                confirmation.finish_markup(markup_job)
+            elif exc.retryable or exc.fatal:
+                delay = max(300 if exc.fatal else 0,
+                            retry_delay(markup_job['attempts'] + 1, exc.retry_after))
+                confirmation.finish_markup(markup_job, retry_at=time.time() + delay)
+                LOGGER.warning('Call button update deferred job=%s code=%s',
+                               markup_job['notification_id'], exc.code)
+                if exc.fatal:
+                    raise
+                return max(1.1, delay) if exc.code == 'http_429' else 1.1
+            else:
+                confirmation.finish_markup(markup_job, gone=True)
+                LOGGER.warning('Call button unavailable job=%s code=%s',
+                               markup_job['notification_id'], exc.code)
+        else:
+            confirmation.finish_markup(markup_job)
+        return 1.1
     job = store.claim(now)
     if job is None:
         return 1.0
