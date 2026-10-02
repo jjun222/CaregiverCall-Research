@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 
-VERSION = '20260923-aptrial-1'
+VERSION = '20260928-aptrial-2-ufw'
 ROOT = Path('/opt/carecall-wifi-aptrial')
 ETC = Path('/etc/carecall-wifi-aptrial')
 RUN = Path('/run/carecall-wifi-aptrial')
