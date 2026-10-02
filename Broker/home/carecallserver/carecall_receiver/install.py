@@ -1,32 +1,93 @@
 #!/usr/bin/env python3
-"""Stage isolated AP-trial files; never activate the trial during installation."""
+"""Stage the Wi-Fi manager and preserve the verified R4 configuration."""
 import argparse
-import configparser
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
-import pwd
-import secrets
+import re
 import shutil
-import subprocess
 import sys
+import tempfile
 
 PACKAGE = Path(__file__).resolve().parent
-sys.path.insert(0, str(PACKAGE / 'app'))
-import common as c
+ROOT = Path('/opt/carecall-wifi-manager')
+ETC = Path('/etc/carecall-wifi-manager')
+SYSTEM = Path('/etc/systemd/system')
+SERVICE = 'carecall-wifi-manager.service'
+OWNER = ETC / 'owner'
+spec = importlib.util.spec_from_file_location('baseline', PACKAGE / 'baseline.py')
+p = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(p)
 
 
-def file_hash(path):
-    h = hashlib.sha256()
-    with Path(path).open('rb') as f:
-        for block in iter(lambda: f.read(1024 * 1024), b''):
-            h.update(block)
-    return h.hexdigest()
+def common_unit(description, executable, writable, user='root', extra=''):
+    return f'''[Unit]
+Description={description}
+BindsTo={SERVICE}
+After={SERVICE} systemd-networkd.service
+ConditionPathExists={OWNER}
+{extra}[Service]
+Type=simple
+User={user}
+ExecStart={executable}
+Restart=no
+TimeoutStopSec=5s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths={writable}
+StandardOutput=null
+StandardError=null
+'''
 
 
-def netplan_hashes():
-    return {str(p): file_hash(p) for p in Path('/etc/netplan').glob('*.yaml')}
+def units():
+    run = '/run/carecall-wifi-manager'
+    result = {SERVICE: f'''[Unit]
+Description=CareCall persistent Wi-Fi and phone recovery
+Wants=systemd-networkd.service
+After=systemd-networkd.service cloud-init-local.service ufw.service
+Conflicts=carecall-wifi-aptrial-test.service carecall-wifi-aptrial-guard.service carecall-wifi-aptrial-hostapd.service carecall-wifi-aptrial-dhcp.service carecall-wifi-aptrial-web.service carecall-wifi-aptrial-router.service
+ConditionPathExists={OWNER}
+StartLimitIntervalSec=0
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/python3 -B {ROOT}/manager.py run
+Restart=always
+RestartSec=5s
+WatchdogSec=120s
+TimeoutStartSec=30s
+TimeoutStopSec=10s
+KillMode=control-group
+RuntimeDirectory=carecall-wifi-manager
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run /etc/netplan /etc/cloud/cloud.cfg.d {ETC}
+StandardOutput=journal
+StandardError=null
+[Install]
+WantedBy=multi-user.target
+'''}
+    for suffix, binary, writable, user, extra in (
+        ('hostapd', f'/usr/sbin/hostapd {run}/hostapd.conf', run, 'root', ''),
+        ('dhcp', f'/usr/sbin/dnsmasq --no-daemon --conf-file={run}/dnsmasq.conf', run, 'root', ''),
+        ('web', f'/usr/bin/python3 -B {ROOT}/web.py', run + '/public', 'carecall-wifi-web', ''),
+        ('router', f'/usr/sbin/wpa_supplicant -Dnl80211 -iwlan0 -c{run}/private/candidate.conf',
+         run, 'root', 'Conflicts=netplan-wpa-wlan0.service carecall-wifi-manager-hostapd.service\n')):
+        result['carecall-wifi-manager-' + suffix + '.service'] = common_unit(
+            'CareCall Wi-Fi setup ' + suffix, binary, writable, user, extra)
+    return result
 
 
 def verify_bundle():
@@ -34,159 +95,142 @@ def verify_bundle():
     for line in (PACKAGE / 'SHA256SUMS').read_text().splitlines():
         expected, name = line.split('  ', 1)
         relative = Path(name)
-        if relative.is_absolute() or '..' in relative.parts or name in names:
-            raise c.TrialError('INVALID_BUNDLE_MANIFEST')
-        path = PACKAGE / relative
-        if path.is_symlink() or file_hash(path) != expected:
-            raise c.TrialError('BUNDLE_HASH_MISMATCH')
+        p.require(not relative.is_absolute() and '..' not in relative.parts and name not in names,
+                  'MANIFEST_INVALID')
+        target = PACKAGE / relative
+        p.require(not target.is_symlink() and p.sha(target.read_bytes()) == expected, 'BUNDLE_HASH_MISMATCH')
         names.add(name)
-    required = {'install.py', 'app/common.py', 'app/controller.py', 'app/web.py'}
-    if not required.issubset(names):
-        raise c.TrialError('BUNDLE_MANIFEST_INCOMPLETE')
+    required = {'install.py', 'baseline.py', 'r4_hashes.json', 'README_KO.md',
+                'app/manager.py', 'app/transaction.py', 'app/common.py', 'app/router.py',
+                'app/web.py', 'app/firewall.py', 'app/reviewed_firewall.json'}
+    p.require(required <= names, 'MANIFEST_INCOMPLETE')
 
 
-def run(args, **kwargs):
-    return subprocess.run(args, check=True, **kwargs)
+def guard_legacy(text):
+    anchor = "    action = parser.parse_args().action\n"
+    p.require(text.count(anchor) == 1, 'LEGACY_CONTROLLER_LAYOUT_CHANGED')
+    return text.replace(anchor, anchor +
+        "    if action not in ('status', 'show-setup') and Path('/etc/carecall-wifi-manager/owner').exists():\n"
+        "        print('ERROR=WIFI_MANAGER_OWNS_NETWORK_USE_MANAGER_COMMAND')\n"
+        "        return 1\n")
 
 
-def preflight(backup):
-    if os.geteuid() != 0:
-        raise c.TrialError('RUN_WITH_SUDO')
-    if sys.version_info < (3, 10):
-        raise c.TrialError('PYTHON_TOO_OLD')
-    if not Path('/usr/sbin/iw').is_file():
-        raise c.TrialError('IW_REQUIRED')
-    if not backup.is_dir() or not (backup / 'manifest.json').is_file():
-        raise c.TrialError('VERIFIED_BACKUP_NOT_FOUND')
-    if not str(backup.resolve()).startswith('/var/backups/carecall/wifi_prepare_'):
-        raise c.TrialError('UNEXPECTED_BACKUP_PATH')
-    manifest = json.loads((backup / 'manifest.json').read_text())
-    if manifest.get('database_integrity') != 'ok':
-        raise c.TrialError('DATABASE_BACKUP_NOT_VERIFIED')
-    for field, filename in (('archive_sha256', 'code_and_configuration.tar.gz'),
-                            ('database_sha256', 'carecall_events.db')):
-        if file_hash(backup / filename) != manifest[field]:
-            raise c.TrialError('BACKUP_HASH_MISMATCH')
-    if not c.station_ready() or not all(c.active(u + '.service') for u in c.CARECALL):
-        raise c.TrialError('CURRENT_SYSTEM_NOT_READY')
-    if c.active('NetworkManager.service') or c.active('hostapd.service') or c.active('dnsmasq.service'):
-        raise c.TrialError('EXISTING_NETWORK_SERVICE_REQUIRES_REVIEW')
-    network = Path('/run/systemd/network/10-netplan-wlan0.network')
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.read_string(network.read_text())
-    if parser.get('Match', 'Name', fallback='') != 'wlan0':
-        raise c.TrialError('NETWORK_INTERFACE_MISMATCH')
-    if parser.get('Network', 'DHCP', fallback='').lower() not in ('yes', 'true', 'ipv4'):
-        raise c.TrialError('DHCP_BASELINE_REQUIRED')
-    if parser.has_option('Network', 'Address'):
-        raise c.TrialError('STATIC_ADDRESS_REQUIRES_REVIEW')
-    if c.AP_NETWORK.exists():
-        raise c.TrialError('AP_RUNTIME_FILE_ALREADY_EXISTS')
-    if c.ETC.exists() or c.ROOT.exists():
-        raise c.TrialError('ALREADY_STAGED_USE_STATUS')
-    # Require an unused subnet on all interfaces before exposing a local DHCP server.
-    import ipaddress
-    addresses = json.loads(c.command('ip', '-j', '-4', 'address', 'show').stdout)
-    subnet = ipaddress.ip_network(c.AP_IP + '/24', strict=False)
-    for link in addresses:
-        for item in link.get('addr_info', []):
-            if item.get('family') == 'inet' and ipaddress.ip_network(
-                    item['local'] + '/' + str(item['prefixlen']), strict=False).overlaps(subnet):
-                raise c.TrialError('SETUP_SUBNET_CONFLICT')
-
-
-def unit(description, command, *, user='root', writable='', timeout=8):
-    return ('[Unit]\nDescription=' + description + '\nAfter=systemd-networkd.service\n'
-            '[Service]\nType=simple\nUser=' + user + '\nExecStart=' + command + '\n'
-            'Restart=no\nTimeoutStopSec=' + str(timeout) + '\nKillMode=control-group\n'
-            'UMask=0077\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=yes\n'
-            'PrivateTmp=yes\n' + ('ReadWritePaths=' + writable + '\n' if writable else '') +
-            'StandardOutput=journal\nStandardError=journal\n')
-
-
-def stage(backup):
+def stage(prepared):
+    p.require(os.geteuid() == 0, 'RUN_WITH_SUDO')
     verify_bundle()
-    preflight(backup)
-    before = netplan_hashes()
-    print('PRECHECK=SUCCESS', flush=True)
-    # Mask only the vendor hostapd unit before installation; our trial uses a separate unit.
-    vendor = Path('/etc/systemd/system/hostapd.service')
-    if os.path.lexists(vendor) and not (vendor.is_symlink() and os.readlink(vendor) == '/dev/null'):
-        raise c.TrialError('EXISTING_HOSTAPD_UNIT_REQUIRES_REVIEW')
-    vendor_created = not os.path.lexists(vendor)
-    if vendor_created:
-        vendor.symlink_to('/dev/null')
-    c.command('systemctl', 'daemon-reload')
-    env = dict(os.environ, NEEDRESTART_MODE='l', LC_ALL='C')
-    run(['/usr/bin/apt-get', '-o', 'APT::Update::Error-Mode=any', 'update'], env=env)
-    run(['/usr/bin/apt-get', 'install', '-y', '--no-install-recommends', '--no-upgrade',
-         '--no-remove', 'hostapd', 'dnsmasq-base'], env=env)
-    for executable in ('/usr/sbin/hostapd', '/usr/sbin/dnsmasq'):
-        if not Path(executable).is_file():
-            raise c.TrialError('DEPENDENCY_EXECUTABLE_MISSING')
+    if ROOT.exists() or ETC.exists():
+        marker = ETC / 'install-complete.json'
+        p.require(marker.is_file(), 'PARTIAL_INSTALL_REQUIRES_REVIEW')
+        installed = p.read_json(marker)
+        p.require(installed.get('package_sha256') == p.sha((PACKAGE / 'SHA256SUMS').read_bytes()),
+                  'DIFFERENT_MANAGER_VERSION_INSTALLED')
+        for path in (PACKAGE / 'app').iterdir():
+            p.require(p.sha(p.read_regular(ROOT / path.name)) == p.sha(path.read_bytes()),
+                      'INSTALLED_MANAGER_CHANGED')
+        for name, value in units().items():
+            p.require(p.read_regular(SYSTEM / name).decode() == value, 'INSTALLED_UNIT_CHANGED')
+        legacy = Path('/opt/carecall-wifi-aptrial/controller.py')
+        p.require(p.sha(p.read_regular(legacy)) == installed['legacy_guarded_sha256'],
+                  'LEGACY_GUARD_CHANGED')
+        print('WIFI_PERSIST_STAGE=ALREADY_STAGED')
+        return
+    c, router, firewall = p.load_installed()
+    p.ensure_idle(c)
+    firewall.check()
+    router.preflight()
+    candidate = p.read_json(c.ETC / 'tested-router-candidate.json')
+    state, report = p.read_json(c.STATE), p.read_json(c.RESULT)
+    p.validate_evidence(state, report, candidate)
+    p.require(prepared.is_absolute() and prepared.parent == p.PARENT and
+              prepared.name.startswith('wifi_persist_prepare_20260929_') and not prepared.is_symlink(),
+              'UNEXPECTED_PREPARE_PATH')
+    info = prepared.stat()
+    p.require(info.st_uid == 0 and info.st_mode & 0o077 == 0, 'PREPARE_DIRECTORY_NOT_PRIVATE')
+    plan = p.read_json(prepared / 'plan.json')
+    p.require(plan.get('version') == p.VERSION and plan.get('status') == 'PREPARED_NOT_APPLIED' and
+              plan.get('test_id') == candidate['test_id'] and
+              plan.get('candidate_matches_current_wifi') is True, 'VERIFIED_PLAN_REQUIRED')
+    for path, expected in plan['sources'].items():
+        p.require(p.sha(p.read_regular(Path(path))) == expected, 'SOURCE_CHANGED_SINCE_PREPARE')
+    sources = router.source_hashes()
+    p.require(sources == state['source_hashes'], 'SOURCE_CHANGED_SINCE_TRIAL')
+    document = p.yaml.safe_load(p.read_regular(router.NETPLAN))
+    desired = p.proposal(document, candidate, router.read_layout())
+    proposal = p.read_regular(prepared / 'proposal-root' / p.NETPLAN_TARGET, private=True)
+    p.require(p.sha(proposal) == plan['proposal_netplan_sha256'] and
+              p.yaml.safe_load(proposal) == desired, 'PREPARED_PROPOSAL_CHANGED')
+    p.require(p.read_regular(prepared / 'proposal-root' / p.CLOUD_TARGET, private=True).decode() ==
+              p.CLOUD_DRAFT, 'PREPARED_CLOUD_POLICY_CHANGED')
+    p.require(not os.path.lexists(Path('/') / p.CLOUD_TARGET), 'CLOUD_POLICY_ALREADY_EXISTS')
+    for name in units():
+        p.require(not os.path.lexists(SYSTEM / name) and
+                  not (SYSTEM / (name + '.d')).exists(), 'MANAGER_UNIT_ALREADY_EXISTS')
+    legacy = c.ROOT / 'controller.py'
+    original = p.read_regular(legacy)
+    patched = guard_legacy(original.decode()).encode()
+    backup = Path(tempfile.mkdtemp(prefix='wifi_persist_install_20260929_', dir=p.PARENT))
+    for name, data in ((str(legacy), original), (str(router.NETPLAN), p.read_regular(router.NETPLAN)),
+                       (str(c.ETC / 'settings.json'), p.read_regular(c.ETC / 'settings.json'))):
+        p.write_private(backup / name.lstrip('/'), data)
+    print('INSTALL_BACKUP_DIR=' + str(backup), flush=True)
+    print('BACKUP_CONTAINS_SECRETS=KEEP_ON_PI_DO_NOT_UPLOAD', flush=True)
+    created_units = []
     try:
-        account = pwd.getpwnam('carecall-wifi-web')
-        if account.pw_shell not in ('/usr/sbin/nologin', '/sbin/nologin'):
-            raise c.TrialError('WEB_ACCOUNT_CONFLICT')
-    except KeyError:
-        run(['/usr/sbin/useradd', '--system', '--user-group', '--no-create-home',
-             '--home-dir', '/nonexistent', '--shell', '/usr/sbin/nologin', 'carecall-wifi-web'])
-    c.ROOT.mkdir(mode=0o755)
-    os.chmod(c.ROOT, 0o755)
-    for name in ('common.py', 'controller.py', 'web.py'):
-        source = PACKAGE / 'app' / name
-        shutil.copyfile(source, c.ROOT / source.name)
-        os.chmod(c.ROOT / source.name, 0o644)
-    c.ETC.mkdir(mode=0o700)
-    config = {'version': c.VERSION, 'ssid': 'CareCall-Pi-' + secrets.token_hex(3),
-              'password': ''.join(secrets.choice('ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789') for _ in range(20)),
-              'backup_dir': str(backup), 'vendor_hostapd_mask_created': vendor_created}
-    c.atomic(c.ETC / 'settings.json', json.dumps(config) + '\n')
-    c.RUN.mkdir(exist_ok=True, mode=0o755)
-    os.chmod(c.RUN, 0o755)
-    c.atomic(Path('/etc/tmpfiles.d/carecall-wifi-aptrial.conf'),
-             f'd {c.RUN} 0755 root root -\n', 0o644)
-    writable = f'{c.RUN} /run/systemd/network {c.ETC}'
-    definitions = {
-        'test': unit('CareCall temporary Wi-Fi AP trial', f'/usr/bin/python3 -B {c.ROOT}/controller.py run-test', writable=writable, timeout=3),
-        'guard': unit('CareCall independent AP trial recovery', f'/usr/bin/python3 -B {c.ROOT}/controller.py guard', writable=writable, timeout=3),
-        'hostapd': unit('CareCall isolated setup AP', f'/usr/sbin/hostapd {c.RUN}/hostapd.conf', writable=str(c.RUN)),
-        'dhcp': unit('CareCall setup AP DHCP', f'/usr/sbin/dnsmasq --no-daemon --conf-file={c.RUN}/dnsmasq.conf', writable=str(c.RUN)),
-        'web': unit('CareCall unprivileged setup connection page', f'/usr/bin/python3 -B {c.ROOT}/web.py',
-                    user='carecall-wifi-web', writable=str(c.RUN / 'public')),
-    }
-    for suffix, definition in definitions.items():
-        if suffix == 'guard':
-            definition = definition.replace('[Unit]\n', '[Unit]\nStartLimitIntervalSec=0\n')
-            definition = definition.replace('Restart=no', 'Restart=on-failure\nRestartSec=2s')
-        if suffix in ('hostapd', 'dhcp', 'web'):
-            definition = definition.replace('StandardOutput=journal', 'StandardOutput=null').replace('StandardError=journal', 'StandardError=null')
-        c.atomic(Path('/etc/systemd/system') / (c.PREFIX + suffix + '.service'), definition, 0o644)
-    c.command('systemctl', 'daemon-reload')
-    if before != netplan_hashes():
-        raise c.TrialError('NETPLAN_SOURCE_CHANGED')
-    if not c.station_ready() or not all(c.active(u + '.service') for u in c.CARECALL):
-        raise c.TrialError('POSTCHECK_NOT_READY')
-    print('WIFI_APTRIAL_STAGE=SUCCESS')
-    print('NETPLAN_SOURCE_UNCHANGED=YES')
-    print('AP_ACTIVATED=NO')
+        ROOT.mkdir(mode=0o755)
+        os.chmod(ROOT, 0o755)  # The unprivileged web service must traverse its code directory.
+        ETC.mkdir(mode=0o700)
+        for source in sorted((PACKAGE / 'app').iterdir()):
+            p.require(source.is_file() and not source.is_symlink(), 'UNEXPECTED_APP_FILE')
+            c.atomic(ROOT / source.name, source.read_text(), 0o644)
+        c.atomic(ETC / 'settings.json', p.read_regular(c.ETC / 'settings.json').decode())
+        initial = {key: candidate.get(key) for key in ('ssid', 'psk_hex', 'hidden', 'regulatory_domain')}
+        c.atomic(ETC / 'profile.json', json.dumps(initial) + '\n')
+        # Actual activation checks freshness again; stage does not alter these sources.
+        activation_hashes = {name: value for name, value in sources.items()}
+        c.atomic(ETC / 'install-baseline.json', json.dumps({
+            'prepare_dir': str(prepared), 'backup_dir': str(backup),
+            'activation_hashes': activation_hashes}) + '\n')
+        for name, value in units().items():
+            c.atomic(SYSTEM / name, value, 0o644)
+            created_units.append(SYSTEM / name)
+        c.atomic(legacy, patched.decode(), 0o644)
+        c.command('systemctl', 'daemon-reload')
+        p.require(router.source_hashes() == sources and c.station_ready() and
+                  all(c.active(name + '.service') for name in c.CARECALL), 'STAGE_POSTCHECK_FAILED')
+        c.atomic(ETC / 'install-complete.json', json.dumps({
+            'package_sha256': p.sha((PACKAGE / 'SHA256SUMS').read_bytes()),
+            'legacy_original_sha256': p.sha(original), 'legacy_guarded_sha256': p.sha(patched)}) + '\n')
+    except Exception:
+        c.atomic(legacy, original.decode(), 0o644)
+        for path in created_units:
+            path.unlink(missing_ok=True)
+        for path in (ROOT, ETC):
+            if path.exists():
+                shutil.rmtree(path)
+        c.command('systemctl', 'daemon-reload', check=False)
+        raise
+    print('WIFI_PERSIST_STAGE=SUCCESS')
+    print('NETPLAN_CLOUD_INIT_AND_UFW_UNCHANGED=YES')
+    print('AP_PASSWORD_UNCHANGED=YES')
+    print('NETWORK_ACTIVATED=NO')
     print('BOOT_AUTOSTART_ENABLED=NO')
-    print('SETUP_CARD=AVAILABLE_PRIVATELY')
-    run(['/usr/bin/python3', '-B', str(c.ROOT / 'controller.py'), 'status'])
+    print('NEXT_ACTION=ACTIVATE')
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('stage',))
-    parser.add_argument('--backup-dir', required=True, type=Path)
+    parser.add_argument('--prepare-dir', type=Path, required=True)
     args = parser.parse_args()
     os.umask(0o077)
+    sys.dont_write_bytecode = True
     try:
-        stage(args.backup_dir)
+        stage(args.prepare_dir)
         return 0
     except Exception as exc:
-        print('WIFI_APTRIAL_STAGE=FAILED code=' + (str(exc) if isinstance(exc, c.TrialError) else type(exc).__name__), file=sys.stderr)
-        print('AP activation was not requested. Send this terminal output; do not change Wi-Fi manually.', file=sys.stderr)
+        code = str(exc) if isinstance(exc, p.PrepareError) or type(exc).__name__ == 'TrialError' else type(exc).__name__
+        code = code if re.fullmatch('[A-Za-z0-9_]+', code) else 'UNEXPECTED_ERROR'
+        print('WIFI_PERSIST_STAGE=FAILED code=' + code)
         return 1
 
 
