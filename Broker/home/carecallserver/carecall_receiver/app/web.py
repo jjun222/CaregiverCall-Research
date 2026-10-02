@@ -34,6 +34,7 @@ button:disabled{opacity:.5}.secondary{background:#edf2f5;color:#18313d}small{col
 </main><script>
 const $=id=>document.getElementById(id);let token='';
 const notices={READY:'공유기 정보를 입력하세요.',CONNECTED:'공유기 연결과 IP 주소 할당을 확인했습니다. 연결 정보가 비공개 후보로 저장됐습니다. 아래 시험 종료 버튼을 눌러 주세요.',CONNECT_TIMEOUT:'제한 시간 안에 연결을 확인하지 못했습니다. Wi-Fi 이름·비밀번호·신호·보안 방식을 확인하고 다시 입력하세요.',CANDIDATE_SERVICE_STOPPED:'연결 시험 프로세스가 종료됐습니다. 다시 시도하거나 시험을 종료하세요.',ROUTER_SUBNET_CONFLICT:'공유기의 주소 대역이 설정 Wi-Fi와 겹칩니다. 시험을 종료하고 개발 PC에서 결과를 확인하세요.',INVALID_REQUEST:'입력 요청을 처리하지 못했습니다. 다시 입력해 주세요.',CONNECTING:'공유기 연결을 시험하고 있습니다. 같은 설정 Wi-Fi에 다시 연결해 이 페이지를 열어 주세요.'};
+notices.CONTROL_STATUS_UNAVAILABLE='기기 내부에서 연결 상태를 조회하지 못했습니다. 비밀번호 오류로 확인된 것은 아닙니다. 시험을 종료한 뒤 개발 PC에서 상태 출력을 확인해 주세요.';
 async function load(){try{const r=await fetch('/session',{cache:'no-store'});if(!r.ok)throw Error();const s=await r.json();if(s.mode!=='router')throw Error();token=s.token;$('status').textContent=notices[s.notice]||'화면을 다시 열어 주세요.';$('submit').disabled=!s.can_submit;$('form').hidden=!s.can_submit;$('finish').disabled=false;}catch(e){$('status').textContent='같은 CareCall 설정 Wi-Fi에 연결한 뒤 페이지를 다시 열어 주세요.';}}
 async function post(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-CareCall-Token':token},body:JSON.stringify(body)});}
 $('form').onsubmit=async e=>{e.preventDefault();if(new TextEncoder().encode($('ssid').value).length>32){$('status').textContent='Wi-Fi 이름은 UTF-8 기준 32바이트 이내여야 합니다.';return;}
