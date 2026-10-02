@@ -59,7 +59,7 @@ def setup_ap():
 def phone_confirmed(state):
     path = c.RUN / 'public' / 'confirmed'
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except (FileNotFoundError, OSError):
         return False
     with os.fdopen(fd, 'rb') as f:
@@ -79,6 +79,9 @@ def restore_original():
         write_phase('restoring')
         for suffix in ('web', 'dhcp', 'hostapd'):
             c.command('systemctl', 'stop', c.PREFIX + suffix + '.service', check=False)
+        if state.get('mode') == 'router':
+            import router
+            router.finish_restore(state)
         if c.AP_NETWORK.exists():
             if not c.AP_NETWORK.read_text().startswith(c.MARKER):
                 raise c.TrialError('UNEXPECTED_AP_RUNTIME_FILE')
@@ -110,6 +113,10 @@ def run_trial():
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     try:
+        if c.read_state().get('mode') == 'router':
+            import router
+            router.run(setup_ap, lambda: stopping, phone_confirmed)
+            return
         setup_ap()
         while not stopping:
             state = c.read_state()
@@ -161,7 +168,7 @@ def check_firewall():
     firewall.check()
 
 
-def start_trial():
+def start_trial(mode='ap'):
     check_firewall()
     if not c.station_ready():
         raise c.TrialError('ORIGINAL_WIFI_NOT_READY')
@@ -180,9 +187,14 @@ def start_trial():
     account = pwd.getpwnam('carecall-wifi-web')
     os.chown(public, 0, account.pw_gid)
     os.chmod(public, 0o770)
-    for name in ('confirmed', 'session.json'):
+    for name in ('confirmed', 'session.json', 'request.json'):
         (public / name).unlink(missing_ok=True)
     state = c.new_state()
+    if mode == 'router':
+        import router
+        if c.active(router.UNIT):
+            raise c.TrialError('ROUTER_TRIAL_ALREADY_RUNNING')
+        state = router.prepare(state)
     c.save_state(state)
     c.atomic(public / 'session.json', json.dumps(c.public_state(state['test_id'], state['token'])), 0o640)
     os.chown(public / 'session.json', 0, account.pw_gid)
@@ -190,8 +202,11 @@ def start_trial():
     c.command('systemctl', 'start', c.PREFIX + 'guard.service')
     if not c.active(c.PREFIX + 'guard.service'):
         raise c.TrialError('RESTORE_GUARD_NOT_RUNNING')
-    print('AP_TEST_SCHEDULED=YES', flush=True)
-    print('AUTOMATIC_RETURN_SECONDS=180', flush=True)
+    print(('ROUTER_TEST_SCHEDULED' if mode == 'router' else 'AP_TEST_SCHEDULED') + '=YES', flush=True)
+    print('AUTOMATIC_RETURN_SECONDS=' + ('900' if mode == 'router' else '180'), flush=True)
+    if mode == 'router':
+        print('ROUTER_CONNECT_TIMEOUT_SECONDS=75', flush=True)
+        print('PERSISTENT_WIFI_CHANGE=NO', flush=True)
     print('SSH_MAY_DISCONNECT=YES', flush=True)
     c.command('systemctl', 'start', '--no-block', c.PREFIX + 'test.service')
 
@@ -205,7 +220,7 @@ def status():
         print('FIREWALL_PRECHECK=' + str(exc))
     for unit in c.CARECALL:
         print('SERVICE ' + unit + '=' + ('active' if c.active(unit + '.service') else 'not_active'))
-    for suffix in ('test', 'guard', 'hostapd', 'dhcp', 'web'):
+    for suffix in ('test', 'guard', 'hostapd', 'dhcp', 'web', 'router'):
         print('TRIAL_SERVICE ' + suffix + '=' + ('active' if c.active(c.PREFIX + suffix + '.service') else 'inactive'))
     state = c.read_state()
     if state:
@@ -214,11 +229,16 @@ def status():
         report = json.loads(c.RESULT.read_text())
         for key in ('result', 'phone_confirmed', 'restored', 'failure'):
             print('LAST_' + key.upper() + '=' + str(report[key]))
+        for key in ('mode', 'router_connected', 'candidate_saved', 'sources_unchanged',
+                    'persistent_wifi_changed', 'attempts', 'last_attempt', 'last_wpa_state'):
+            if key in report:
+                label = {'last_attempt': 'LAST_ATTEMPT_RESULT', 'last_wpa_state': 'LAST_WPA_STATE'}.get(key, 'LAST_' + key.upper())
+                print(label + '=' + str(report[key]))
 
 
 def main():
     parser = argparse.ArgumentParser(description='CareCall temporary AP connectivity trial')
-    parser.add_argument('action', choices=('status', 'show-setup', 'test-ap', 'restore', 'run-test', 'guard'))
+    parser.add_argument('action', choices=('status', 'show-setup', 'test-ap', 'test-router', 'restore', 'run-test', 'guard'))
     action = parser.parse_args().action
     if os.geteuid() != 0:
         print('ERROR=RUN_WITH_SUDO', file=sys.stderr)
@@ -233,8 +253,9 @@ def main():
             print('Wi-Fi: ' + config['ssid'])
             print('Password: ' + config['password'])
             print(f'Browser: http://{c.AP_IP}:{c.AP_PORT}/')
-        elif action == 'test-ap':
-            start_trial()
+        elif action in ('test-ap', 'test-router'):
+            with c.network_lock():
+                start_trial('router' if action == 'test-router' else 'ap')
         elif action == 'run-test':
             run_trial()
         elif action == 'guard':
