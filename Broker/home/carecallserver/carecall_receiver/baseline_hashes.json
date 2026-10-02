@@ -1,0 +1,7 @@
+{
+  "common.py": "*가림*",
+  "firewall.py": "*가림*",
+  "web.py": "*가림*",
+  "controller.py": "*가림*",
+  "reviewed_firewall.json": "*가림*"
+}
