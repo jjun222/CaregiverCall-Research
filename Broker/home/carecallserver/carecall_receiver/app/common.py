@@ -10,14 +10,14 @@ import subprocess
 import tempfile
 import time
 
-VERSION = '20260929-persist-1'
+VERSION = '20261001-lan-1'
 ROOT = Path('/opt/carecall-wifi-manager')
 ETC = Path('/etc/carecall-wifi-manager')
 RUN = Path('/run/carecall-wifi-manager')
 STATE = RUN / 'state.json'
 RESULT = ETC / 'last-result.json'
 AP_NETWORK = Path('/run/systemd/network/00-carecall-wifi-manager.network')
-AP_IP = '*가림*'
+AP_IP = '*가린*'
 AP_PORT = 8080
 STATION = 'netplan-wpa-wlan0.service'
 PREFIX = 'carecall-wifi-manager-'
