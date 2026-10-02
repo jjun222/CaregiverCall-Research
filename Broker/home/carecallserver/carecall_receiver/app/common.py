@@ -10,19 +10,19 @@ import subprocess
 import tempfile
 import time
 
-VERSION = '20260928-routertrial-4-routejson'
-ROOT = Path('/opt/carecall-wifi-aptrial')
-ETC = Path('/etc/carecall-wifi-aptrial')
-RUN = Path('/run/carecall-wifi-aptrial')
+VERSION = '20260929-persist-1'
+ROOT = Path('/opt/carecall-wifi-manager')
+ETC = Path('/etc/carecall-wifi-manager')
+RUN = Path('/run/carecall-wifi-manager')
 STATE = RUN / 'state.json'
 RESULT = ETC / 'last-result.json'
-AP_NETWORK = Path('/run/systemd/network/00-carecall-wifi-aptrial.network')
+AP_NETWORK = Path('/run/systemd/network/00-carecall-wifi-manager.network')
 AP_IP = '*가림*'
 AP_PORT = 8080
 STATION = 'netplan-wpa-wlan0.service'
-PREFIX = 'carecall-wifi-aptrial-'
+PREFIX = 'carecall-wifi-manager-'
 CARECALL = ('mosquitto', 'carecall-receiver', 'carecall-telegram', 'carecall-registration')
-MARKER = '# Managed by CareCall Wi-Fi AP trial\n'
+MARKER = '# Managed by CareCall Wi-Fi manager\n'
 COMMANDS = {
     'systemctl': '/usr/bin/systemctl', 'networkctl': '/usr/bin/networkctl',
     'ip': '/usr/sbin/ip', 'iw': '/usr/sbin/iw',
