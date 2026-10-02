@@ -157,30 +157,8 @@ def guard():
 
 
 def check_firewall():
-    # A conflicting firewall requires review before a no-console network trial.
-    ufw = Path('/usr/sbin/ufw')
-    if ufw.exists():
-        import subprocess
-        r = subprocess.run([str(ufw), 'status'], stdout=subprocess.PIPE,
-                           stderr=subprocess.DEVNULL, text=True, timeout=10,
-                           env=dict(os.environ, LC_ALL='C'))
-        if r.returncode != 0 or 'Status: active' in r.stdout:
-            raise c.TrialError('ACTIVE_OR_UNKNOWN_UFW_REQUIRES_REVIEW')
-    # Do not silently assume custom nft/iptables INPUT rules allow the AP page.
-    import subprocess
-    for executable, args in (('/usr/sbin/nft', ['list', 'ruleset']),
-                             ('/usr/sbin/iptables', ['-S', 'INPUT'])):
-        if not Path(executable).exists():
-            continue
-        p = subprocess.run([executable, *args], stdout=subprocess.PIPE,
-                           stderr=subprocess.DEVNULL, text=True, timeout=10)
-        if p.returncode:
-            raise c.TrialError('FIREWALL_INSPECTION_FAILED')
-        if executable.endswith('/nft') and 'hook input' in p.stdout:
-            raise c.TrialError('CUSTOM_INPUT_FIREWALL_REQUIRES_REVIEW')
-        if executable.endswith('/iptables') and any(
-                line.strip() not in ('', '-P INPUT ACCEPT') for line in p.stdout.splitlines()):
-            raise c.TrialError('CUSTOM_INPUT_FIREWALL_REQUIRES_REVIEW')
+    import firewall
+    firewall.check()
 
 
 def start_trial():
