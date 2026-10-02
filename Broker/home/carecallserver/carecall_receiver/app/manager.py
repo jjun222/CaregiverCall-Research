@@ -249,11 +249,21 @@ def saved_ready(profile):
         return False
 
 
+def sync_lan():
+    try:
+        firewall.sync_current()
+        state_update(lan_failure=None)
+        return True
+    except c.TrialError as exc:
+        state_update(lan_failure=str(exc))
+        return False
+
+
 def wait_saved(profile, seconds=90):
     end = c.now() + seconds
     while c.now() < end:
         if saved_ready(profile):
-            return True
+            return sync_lan()
         pause(1)
     return False
 
@@ -404,6 +414,10 @@ def main_loop():
                 offline_since = None
                 continue
             if saved_ready(tx.obj(tx.PROFILE)):
+                if not sync_lan():
+                    open_ap('SAVED_UNAVAILABLE')
+                    offline_since = None
+                    continue
                 offline_since = None
                 state_update(link_ready=True)
             else:
@@ -490,6 +504,7 @@ def status():
     record = tx.obj(ACTIVATION) if ACTIVATION.exists() else {}
     print('PERSIST_RESULT=' + record.get('result', 'NOT_ACTIVATED'))
     print('LAST_FAILURE=' + str(state.get('last_failure') or record.get('failure')))
+    print('LAN_FAILURE=' + str(state.get('lan_failure')))
     profile = tx.obj(tx.PROFILE)
     pending = tx.obj(tx.JOURNAL).get('phase') == 'pending' if tx.JOURNAL.exists() else False
     committed = bool(profile.get('committed_boot_id')) and not pending
@@ -507,7 +522,10 @@ def status():
         print('FIREWALL_PRECHECK=PASS')
     except c.TrialError as exc:
         print('FIREWALL_PRECHECK=' + str(exc))
-    print('MQTT_NEW_SUBNET_SUPPORT=NOT_IMPLEMENTED')
+    try:
+        firewall.report()
+    except c.TrialError as exc:
+        print('LAN_FIREWALL_ERROR=' + str(exc))
 
 
 def main():
