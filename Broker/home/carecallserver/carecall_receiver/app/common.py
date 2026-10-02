@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 
-VERSION = '20260928-routertrial-1'
+VERSION = '20260928-routertrial-4-routejson'
 ROOT = Path('/opt/carecall-wifi-aptrial')
 ETC = Path('/etc/carecall-wifi-aptrial')
 RUN = Path('/run/carecall-wifi-aptrial')
@@ -159,7 +159,9 @@ def final_report(state):
                       and not state.get('failure') else 'NOT_PASSED'}
     report['mode'] = state.get('mode', 'ap')
     if report['mode'] == 'router':
-        for key in ('router_connected', 'candidate_saved', 'sources_unchanged', 'attempts', 'last_attempt', 'last_wpa_state'):
+        for key in ('router_connected', 'candidate_saved', 'sources_unchanged', 'attempts',
+                    'last_attempt', 'last_wpa_state', 'last_control_result',
+                    'candidate_identity_match', 'last_readiness'):
             report[key] = state.get(key)
         if not all(state.get(key) for key in ('router_connected', 'candidate_saved', 'sources_unchanged')):
             report['result'] = 'NOT_PASSED'
