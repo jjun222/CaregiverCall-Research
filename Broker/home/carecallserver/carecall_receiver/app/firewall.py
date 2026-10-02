@@ -17,9 +17,9 @@ BASELINE = Path(__file__).with_name('reviewed_firewall.json')
 # Rule order is part of the reviewed configuration. All rules are IPv4/wlan0.
 RULES = (
     ('tcp', '*가림*', None, '*가림*', '*가림*', 'CareCall AP trial web'),
-    ('udp', '*가림*', '68', '*가림*', '*가림*', 'CareCall AP trial DHCP initial'),
-    ('udp', '*가림*', '68', '*가림*', '*가림*', 'CareCall AP trial DHCP broadcast'),
-    ('udp', '*가림*', '68', '*가림*', '*가림*', 'CareCall AP trial DHCP unicast'),
+    ('udp', '*가림*', '*가림*', '*가림*', '*가림*', 'CareCall AP trial DHCP initial'),
+    ('udp', '*가림*', '*가림*', '*가림*', '*가림*', 'CareCall AP trial DHCP broadcast'),
+    ('udp', '*가림*', '*가림*', '*가림*', '*가림*', 'CareCall AP trial DHCP unicast'),
 )
 
 
