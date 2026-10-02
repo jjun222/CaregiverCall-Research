@@ -59,6 +59,7 @@ def verify_bundle():
             raise c.TrialError('BUNDLE_HASH_MISMATCH')
         names.add(name)
     required = {'apply_patch.py', 'baseline_hashes.json', 'previous_routertrial_hashes.json',
+                'previous_r2_hashes.json', 'previous_r3_hashes.json',
                 'app/firewall.py', 'app/reviewed_firewall.json'}
     required.update('app/' + name for name in PAYLOAD)
     if not required <= names:
@@ -70,6 +71,8 @@ def preflight():
         raise c.TrialError('RUN_WITH_SUDO')
     original = json.loads((PACKAGE / 'baseline_hashes.json').read_text())
     previous = json.loads((PACKAGE / 'previous_routertrial_hashes.json').read_text())
+    previous_r2 = json.loads((PACKAGE / 'previous_r2_hashes.json').read_text())
+    previous_r3 = json.loads((PACKAGE / 'previous_r3_hashes.json').read_text())
     for name in set(PAYLOAD) | set(original):
         target = c.ROOT / name
         if name == 'router.py' and not target.exists():
@@ -79,6 +82,10 @@ def preflight():
             acceptable.add(original[name])
         if name in previous:
             acceptable.add(previous[name])
+        if name in previous_r2:
+            acceptable.add(previous_r2[name])
+        if name in previous_r3:
+            acceptable.add(previous_r3[name])
         if target.is_symlink() or not target.is_file() or digest(target) not in acceptable:
             raise c.TrialError('INSTALLED_SOURCE_DIFFERS_' + name.replace('.', '_'))
     if UNIT_PATH.exists() and (UNIT_PATH.is_symlink() or UNIT_PATH.read_text() != unit_text()):
@@ -120,6 +127,27 @@ def backup():
     print('BACKUP_CONTAINS_SECRETS=KEEP_ON_PI_DO_NOT_UPLOAD', flush=True)
 
 
+def upgrade_basis(report):
+    if (report.get('result') == 'PASS' and report.get('phone_confirmed') is True
+            and report.get('restored') is True):
+        return 'PASSED_PHONE_TRIAL'
+    # A failed router check must not prevent its own repair. Require a known,
+    # complete installed router bundle and confirmed, unchanged restoration.
+    # Keep the failed report intact; never fabricate a PASS to bypass the gate.
+    known = {'20260928-routertrial-1': 'previous_routertrial_hashes.json',
+             '20260928-routertrial-2-regdom': 'previous_r2_hashes.json',
+             '20260928-routertrial-3-ctrlpath': 'previous_r3_hashes.json'}
+    if (report.get('version') in known and report.get('mode') == 'router'
+            and report.get('restored') is True and report.get('failure') is None
+            and report.get('sources_unchanged') is True
+            and report.get('persistent_wifi_changed') is False and UNIT_PATH.is_file()):
+        expected = json.loads((PACKAGE / known[report['version']]).read_text())
+        if all((c.ROOT / name).is_file() and digest(c.ROOT / name) == expected[name]
+               for name in PAYLOAD):
+            return 'RESTORED_KNOWN_ROUTER_TRIAL'
+    raise c.TrialError('PASSED_PHONE_TRIAL_OR_RESTORED_KNOWN_ROUTER_TRIAL_REQUIRED')
+
+
 def apply():
     verify_bundle()
     before = preflight()
@@ -128,8 +156,7 @@ def apply():
         print('WIFI_ROUTERTRIAL_PATCH=ALREADY_APPLIED')
         return
     result = json.loads(c.RESULT.read_text())
-    if not (result.get('result') == 'PASS' and result.get('phone_confirmed') and result.get('restored')):
-        raise c.TrialError('PASSED_PHONE_AP_TRIAL_REQUIRED')
+    basis = upgrade_basis(result)
     backup()
     targets = [c.ROOT / name for name in PAYLOAD] + [UNIT_PATH]
     old = {p: p.read_text() if p.exists() else None for p in targets}
@@ -158,6 +185,10 @@ def apply():
         raise
     print('WIFI_ROUTERTRIAL_PATCH=SUCCESS')
     print('VERSION=' + c.VERSION)
+    print('UPGRADE_BASIS=' + basis)
+    print('WPA_CLIENT_REPLY_PATH=PRIVATE_RUN_DIRECTORY')
+    print('DEFAULT_ROUTE_CHECK=UNFILTERED_JSON_THEN_WLAN0_MATCH')
+    print('PRIVATETMP_PRESERVED=YES')
     print('REGULATORY_DOMAIN_POLICY=PRESERVE_EXISTING_NETPLAN_SETTING')
     print('FIREWALL_PRECHECK=PASS')
     print('AP_PASSWORD_UNCHANGED=YES')
