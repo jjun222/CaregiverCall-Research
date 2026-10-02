@@ -58,7 +58,8 @@ def verify_bundle():
         if target.is_symlink() or digest(target) != expected:
             raise c.TrialError('BUNDLE_HASH_MISMATCH')
         names.add(name)
-    required = {'apply_patch.py', 'baseline_hashes.json', 'app/firewall.py', 'app/reviewed_firewall.json'}
+    required = {'apply_patch.py', 'baseline_hashes.json', 'previous_routertrial_hashes.json',
+                'app/firewall.py', 'app/reviewed_firewall.json'}
     required.update('app/' + name for name in PAYLOAD)
     if not required <= names:
         raise c.TrialError('MANIFEST_INCOMPLETE')
@@ -68,6 +69,7 @@ def preflight():
     if os.geteuid() != 0:
         raise c.TrialError('RUN_WITH_SUDO')
     original = json.loads((PACKAGE / 'baseline_hashes.json').read_text())
+    previous = json.loads((PACKAGE / 'previous_routertrial_hashes.json').read_text())
     for name in set(PAYLOAD) | set(original):
         target = c.ROOT / name
         if name == 'router.py' and not target.exists():
@@ -75,6 +77,8 @@ def preflight():
         acceptable = {digest(PACKAGE / 'app' / name)}
         if name in original:
             acceptable.add(original[name])
+        if name in previous:
+            acceptable.add(previous[name])
         if target.is_symlink() or not target.is_file() or digest(target) not in acceptable:
             raise c.TrialError('INSTALLED_SOURCE_DIFFERS_' + name.replace('.', '_'))
     if UNIT_PATH.exists() and (UNIT_PATH.is_symlink() or UNIT_PATH.read_text() != unit_text()):
@@ -154,6 +158,7 @@ def apply():
         raise
     print('WIFI_ROUTERTRIAL_PATCH=SUCCESS')
     print('VERSION=' + c.VERSION)
+    print('REGULATORY_DOMAIN_POLICY=PRESERVE_EXISTING_NETPLAN_SETTING')
     print('FIREWALL_PRECHECK=PASS')
     print('AP_PASSWORD_UNCHANGED=YES')
     print('NETPLAN_AND_CLOUD_INIT_UNCHANGED=YES')
