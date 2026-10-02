@@ -1,98 +1,164 @@
 import copy
-import importlib.util
+from contextlib import ExitStack
+import json
+import os
 from pathlib import Path
-import re
-import sys
+import tempfile
 import unittest
-from unittest import mock
+from unittest.mock import patch
 
-PACKAGE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PACKAGE / 'app'))
-import common as c
-import firewall as fw
-spec = importlib.util.spec_from_file_location('patch_installer', PACKAGE / 'apply_patch.py')
-patch = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(patch)
+from support import c, fw, address, route, raw, FakeUFW
+
+
+class SelectionTests(unittest.TestCase):
+    def test_selects_connected_private_lan_from_actual_prefix(self):
+        for ip, prefix, gateway, expected in (
+            ('*가린*', 24, '*가린*', '*가린*'),
+            ('*가린*', 24, '*가린*', '*가린*'),
+            ('*가린*', 23, '*가린*', '*가린*'),
+            ('*가린*', 28, '*가린*', '*가린*')):
+            with self.subTest(ip=ip):
+                self.assertEqual(fw.select_network(address(ip, prefix), route(gateway)), expected)
+
+    def test_rejects_public_cgnat_link_local_reserved_overlap(self):
+        for ip, prefix, gateway in (
+            ('8.8.8.10', 24, '8.8.8.1'), ('100.64.0.10', 24, '100.64.0.1'),
+            ('169.254.1.10', 24, '169.254.1.1'), ('*가린*', 24, '*가린*'),
+            ('*가린*', 24, '*가린*1'), ('*가린*', 16, '192.168.0.1')):
+            with self.subTest(ip=ip), self.assertRaises(c.TrialError):
+                fw.select_network(address(ip, prefix), route(gateway))
+
+    def test_rejects_missing_wrong_interface_and_invalid_gateway(self):
+        for routes in ([], route(dev='eth0'), route('192.168.1.1'), route('192.168.0.7'),
+                       route('192.168.0.0'), route('192.168.0.255')):
+            with self.subTest(routes=routes), self.assertRaises(c.TrialError):
+                fw.select_network(address(), routes)
+
+    def test_ignores_eth0_default_in_unfiltered_route_json(self):
+        self.assertEqual(fw.select_network(address(), route('10.1.0.1', 'eth0') + route()), fw.ORIGINAL)
+
+    def test_rejects_ambiguous_multiple_subnets(self):
+        addresses = address()
+        addresses[0]['addr_info'] += address('10.10.10.7')[0]['addr_info']
+        with self.assertRaisesRegex(c.TrialError, 'AMBIGUOUS'):
+            fw.select_network(addresses, route() + route('10.10.10.1'))
+
+    def test_invalid_state_subnets(self):
+        for net in ('192.168.0.1/24', '::/0', '0.0.0.0/0', '10.0.0.0/31', '172.32.0.0/24'):
+            with self.subTest(net=net), self.assertRaises(c.TrialError):
+                fw.validate_network(net)
 
 
 class FirewallTests(unittest.TestCase):
     def setUp(self):
-        self.raw = (PACKAGE / 'tests' / 'reviewed_ufw_raw.txt').read_text()
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.ufw = FakeUFW()
+        self.ufw.install(self.stack, self.root)
 
-    def test_actual_user_log_is_recognized_without_changes(self):
-        self.assertEqual(fw.reviewed_count(fw.normalize(self.raw)), 0)
+    def test_current_lan_bootstrap_does_not_change_any_rule(self):
+        before = copy.deepcopy(self.ufw.records)
+        fw.reconcile(fw.ORIGINAL)
+        self.assertEqual(before, self.ufw.records)
+        self.assertEqual(self.ufw.operations, [])
+        self.assertEqual(fw.state_path().stat().st_mode & 0o777, 0o600)
+        self.assertEqual(fw.load_state()['phase'], 'committed')
 
-    def test_packet_counters_and_reference_counts_do_not_change_review(self):
-        changed = re.sub(r'(?m)^(\s*)\d+\s+\d+(\s+\S+\s+\S+\s+--)', r'\g<1>999999 12345678\2', self.raw)
-        changed = re.sub(r'\d+ packets, \d+ bytes', '8765 packets, 9999 bytes', changed)
-        changed = re.sub(r'\d+ references', '789 references', changed)
-        self.assertEqual(fw.normalize(changed), fw.normalize(self.raw))
+    def test_adds_both_new_before_deleting_old_and_preserves_others(self):
+        target = '192.168.50.0/24'
+        before, _ = fw.split_lan(self.ufw.records, [fw.ORIGINAL])
+        fw.reconcile(target)
+        self.assertEqual([op[0] for op in self.ufw.operations], ['add', 'add', 'delete', 'delete'])
+        after, found = fw.split_lan(self.ufw.records, [target])
+        self.assertEqual(before, after)
+        self.assertEqual(found, {(target, '22'), (target, '1883')})
+        self.assertEqual(fw.load_state()['networks'], [target])
+        fw.check()
 
-    def test_raw_report_with_four_appended_rules_matches(self):
-        raw_lines = '\n'.join(' 0 0 ' + fw.rule_record(rule)[2:] for rule in fw.RULES)
-        anchor = '\nChain ufw-user-limit '
-        raw = self.raw.replace(anchor, '\n' + raw_lines + '\n' + anchor, 1)
-        self.assertEqual(fw.reviewed_count(fw.normalize(raw)), 4)
-
-    def test_unknown_or_broader_firewall_rules_are_rejected(self):
-        for change in (
-            self.raw.replace('192.168.0.0/24', '0.0.0.0/0'),
-            self.raw.replace('Chain INPUT (policy DROP', 'Chain INPUT (policy ACCEPT', 1),
-            self.raw.replace('tcp dpt:1883', 'tcp dpt:8883'),
-            self.raw.replace('udp dpt:5353', 'udp dpt:5354'),
-        ):
-            with self.assertRaises(c.TrialError):
-                fw.reviewed_count(fw.normalize(change))
-
-    def test_missing_ipv6_or_malformed_report_is_rejected(self):
-        for value in (self.raw.split('IPV6:')[0], self.raw + '\nUNKNOWN ERROR\n'):
-            with self.assertRaises(c.TrialError):
-                fw.normalize(value)
-
-    def test_dhcp_initial_address_and_all_rules_are_scoped(self):
-        self.assertEqual(fw.RULES[1][1], '0.0.0.0/32')
-        for rule in fw.RULES:
-            args = fw.rule_args(rule)
-            self.assertEqual(args[:4], ['allow', 'in', 'on', 'wlan0'])
-            self.assertIn(rule[3], ('192.168.77.1', '255.255.255.255'))
-            self.assertNotIn('0.0.0.0/0', args)
-            self.assertNotIn('any', args)
-        self.assertEqual([r[2] for r in fw.RULES[1:]], ['68'] * 3)
-
-    def test_inactive_ufw_is_not_approved(self):
-        with mock.patch.object(fw, 'run_ufw', return_value='Status: inactive\n'):
-            with self.assertRaisesRegex(c.TrialError, 'MUST_REMAIN_ACTIVE'):
-                fw.inspect()
-
-    def test_partial_rules_do_not_pass_trial_precheck(self):
-        with mock.patch.object(fw, 'inspect', return_value=(3, '', '')):
-            with self.assertRaisesRegex(c.TrialError, 'INCOMPLETE'):
+    def test_each_interrupted_mutation_is_resumable_from_durable_state(self):
+        for failure in range(1, 5):
+            with self.subTest(failure=failure):
+                fw.state_path().unlink(missing_ok=True)
+                self.ufw.records = fw.base.expected(4)
+                self.ufw.operations.clear()
+                self.ufw.crash_after = failure
+                with self.assertRaises(SystemExit):
+                    fw.reconcile('192.168.50.0/24')
+                self.assertEqual(fw.load_state()['phase'], 'pending')
                 fw.check()
+                self.ufw.crash_after = None
+                fw.reconcile('192.168.50.0/24')
+                self.assertEqual(fw.load_state()['phase'], 'committed')
+                self.assertEqual(fw.inspect()[1], {('192.168.50.0/24', p) for p in fw.PORTS})
 
-    def test_all_reviewed_rules_pass_trial_precheck(self):
-        with mock.patch.object(fw, 'inspect', return_value=(4, '', '')):
+    def test_interrupted_new_lan_can_return_to_previous_lan(self):
+        self.ufw.crash_after = 1
+        with self.assertRaises(SystemExit):
+            fw.reconcile('192.168.50.0/24')
+        self.ufw.crash_after = None
+        fw.reconcile(fw.ORIGINAL)
+        self.assertEqual(fw.inspect()[1], {(fw.ORIGINAL, p) for p in fw.PORTS})
+
+    def test_power_loss_before_commit_and_changed_destination_lan(self):
+        self.ufw.crash_after = 3
+        with self.assertRaises(SystemExit):
+            fw.reconcile('192.168.50.0/24')
+        self.ufw.crash_after = None
+        fw.reconcile('10.40.0.0/24')
+        self.assertEqual(fw.inspect()[1], {('10.40.0.0/24', p) for p in fw.PORTS})
+
+    def test_failed_durable_flush_leaves_pending_recoverable(self):
+        with patch.object(fw, 'flush_rules', side_effect=OSError('simulated disk error')):
+            with self.assertRaises(OSError):
+                fw.reconcile('10.40.0.0/24')
+        self.assertEqual(fw.load_state()['phase'], 'pending')
+        fw.reconcile('10.40.0.0/24')
+        self.assertEqual(fw.load_state()['phase'], 'committed')
+
+    def test_unknown_rule_or_altered_ap_rule_is_rejected_before_mutation(self):
+        for records in (fw.base.expected(4) + ['R ACCEPT 6 -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:9999'],
+                        [r for r in fw.base.expected(4) if 'dpt:8080' not in r]):
+            with self.subTest(records=len(records)):
+                self.ufw.records = records
+                with self.assertRaises(c.TrialError):
+                    fw.reconcile('192.168.50.0/24')
+                self.assertFalse(self.ufw.operations)
+                self.assertFalse(fw.state_path().exists())
+
+    def test_matching_rule_in_another_chain_is_not_ignored(self):
+        self.ufw.records.insert(self.ufw.records.index('C ufw-user-output -') + 1,
+                                fw.lan_record(fw.ORIGINAL, '22'))
+        with self.assertRaises(c.TrialError):
             fw.check()
 
-    def test_rule_failure_rolls_back_only_attempted_additions_in_reverse(self):
-        attempted = []
-        with (mock.patch.object(fw, 'run_ufw', side_effect=['', c.TrialError('FAILED')]),
-              mock.patch.object(fw, 'inspect', return_value=(1, '', ''))):
-            with self.assertRaises(c.TrialError):
-                patch.apply_rules(0, attempted)
-        self.assertEqual(attempted, [0, 1])
-        with (mock.patch.object(fw, 'run_ufw', return_value='') as run,
-              mock.patch.object(fw, 'inspect', return_value=(0, '', ''))):
-            self.assertTrue(patch.rollback_rules(attempted, 0))
-        self.assertEqual(run.call_args_list, [
-            mock.call('--force', 'delete', *fw.rule_args(fw.RULES[1])),
-            mock.call('--force', 'delete', *fw.rule_args(fw.RULES[0]))])
+    def test_duplicates_and_missing_committed_rules_rejected(self):
+        self.ufw.records.insert(self.ufw.records.index('C ufw-user-input -') + 1,
+                                fw.lan_record(fw.ORIGINAL, '22'))
+        with self.assertRaisesRegex(c.TrialError, 'DUPLICATE'):
+            fw.check()
+        self.ufw.records = [r for r in fw.base.expected(4) if r != fw.lan_record(fw.ORIGINAL, '22')]
+        with self.assertRaisesRegex(c.TrialError, 'MISSING'):
+            fw.check()
 
-    def test_additional_native_nft_table_is_rejected(self):
-        result = mock.Mock(returncode=0, stdout='{"nftables":[{"table":{"family":"inet","name":"custom"}}]}')
-        with (mock.patch.object(fw.Path, 'exists', return_value=True),
-              mock.patch.object(fw.subprocess, 'run', return_value=result)):
-            with self.assertRaisesRegex(c.TrialError, 'ADDITIONAL_NFT_TABLE'):
-                fw.check_extra_nft_tables()
+    def test_rejects_publicly_readable_or_malformed_state(self):
+        fw.reconcile(fw.ORIGINAL)
+        os.chmod(fw.state_path(), 0o644)
+        with self.assertRaises(c.TrialError):
+            fw.load_state()
+        os.chmod(fw.state_path(), 0o600)
+        fw.state_path().write_text('{broken')
+        with self.assertRaisesRegex(c.TrialError, 'STATE_INVALID'):
+            fw.load_state()
+
+    def test_cache_never_delays_a_changed_subnet(self):
+        with patch.object(fw, 'current_network', return_value=fw.ORIGINAL):
+            fw.sync_current()
+            fw.sync_current()
+        self.assertFalse(self.ufw.operations)
+        with patch.object(fw, 'current_network', return_value='10.40.0.0/24'):
+            fw.sync_current()
+        self.assertEqual(fw.load_state()['target'], '10.40.0.0/24')
 
 
 if __name__ == '__main__':
