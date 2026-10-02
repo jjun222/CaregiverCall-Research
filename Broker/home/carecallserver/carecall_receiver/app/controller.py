@@ -225,14 +225,28 @@ def status():
     state = c.read_state()
     if state:
         print('TRIAL_PHASE=' + state['phase'])
+        for key, label in (('mode', 'MODE'), ('restored', 'RESTORED'),
+                           ('router_connected', 'ROUTER_CONNECTED'),
+                           ('candidate_saved', 'CANDIDATE_SAVED'), ('attempts', 'ATTEMPTS'),
+                           ('last_attempt', 'ATTEMPT_RESULT'), ('last_wpa_state', 'WPA_STATE'),
+                           ('last_control_result', 'CONTROL_RESULT'),
+                           ('candidate_identity_match', 'IDENTITY_MATCH'),
+                           ('last_readiness', 'READINESS')):
+            if key in state:
+                print('CURRENT_' + label + '=' + str(state[key]))
     if c.RESULT.exists():
         report = json.loads(c.RESULT.read_text())
+        print('LAST_REPORT_IS_CURRENT_TRIAL=' + str(bool(state and
+              report.get('test_id') == state.get('test_id'))))
         for key in ('result', 'phone_confirmed', 'restored', 'failure'):
             print('LAST_' + key.upper() + '=' + str(report[key]))
         for key in ('mode', 'router_connected', 'candidate_saved', 'sources_unchanged',
-                    'persistent_wifi_changed', 'attempts', 'last_attempt', 'last_wpa_state'):
+                    'persistent_wifi_changed', 'attempts', 'last_attempt', 'last_wpa_state',
+                    'last_control_result', 'candidate_identity_match', 'last_readiness'):
             if key in report:
-                label = {'last_attempt': 'LAST_ATTEMPT_RESULT', 'last_wpa_state': 'LAST_WPA_STATE'}.get(key, 'LAST_' + key.upper())
+                label = {'last_attempt': 'LAST_ATTEMPT_RESULT', 'last_wpa_state': 'LAST_WPA_STATE',
+                         'last_control_result': 'LAST_CONTROL_RESULT',
+                         'last_readiness': 'LAST_READINESS'}.get(key, 'LAST_' + key.upper())
                 print(label + '=' + str(report[key]))
 
 
