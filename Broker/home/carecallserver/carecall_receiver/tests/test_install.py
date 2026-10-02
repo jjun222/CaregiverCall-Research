@@ -1,6 +1,8 @@
 import contextlib
 import importlib.util
+import hashlib
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -16,6 +18,33 @@ spec.loader.exec_module(installer)
 
 
 class InstallTests(unittest.TestCase):
+    def test_failed_but_restored_known_router_trial_can_be_repaired_without_fake_pass(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            app = root / 'installed'
+            app.mkdir()
+            for name in installer.PAYLOAD:
+                (app / name).write_text('known previous ' + name)
+            expected = {name:hashlib.sha256((app / name).read_bytes()).hexdigest()
+                        for name in installer.PAYLOAD}
+            (root / 'previous_r3_hashes.json').write_text(json.dumps(expected))
+            unit = root / 'router.service'
+            unit.write_text('known-unit')
+            report = dict(version='20260928-routertrial-3-ctrlpath', mode='router',
+                          result='NOT_PASSED', restored=True, sources_unchanged=True,
+                          persistent_wifi_changed=False, failure=None, phone_confirmed=False)
+            with mock.patch.object(c, 'ROOT', app), \
+                 mock.patch.multiple(installer, PACKAGE=root, UNIT_PATH=unit):
+                self.assertEqual(installer.upgrade_basis(report), 'RESTORED_KNOWN_ROUTER_TRIAL')
+                self.assertEqual(report['result'], 'NOT_PASSED')
+                for key, value in (('restored', False), ('sources_unchanged', False),
+                                   ('persistent_wifi_changed', True), ('failure', 'RESTORE_FAILED')):
+                    with self.subTest(key=key), self.assertRaises(c.TrialError):
+                        installer.upgrade_basis(dict(report, **{key: value}))
+                (app / 'router.py').write_text('unrecognized edit')
+                with self.assertRaises(c.TrialError):
+                    installer.upgrade_basis(report)
+
     def fixture(self, root):
         app = root / 'app'
         app.mkdir()
