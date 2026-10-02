@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 
-VERSION = '20260928-aptrial-2-ufw'
+VERSION = '20260928-routertrial-1'
 ROOT = Path('/opt/carecall-wifi-aptrial')
 ETC = Path('/etc/carecall-wifi-aptrial')
 RUN = Path('/run/carecall-wifi-aptrial')
@@ -26,6 +26,7 @@ MARKER = '# Managed by CareCall Wi-Fi AP trial\n'
 COMMANDS = {
     'systemctl': '/usr/bin/systemctl', 'networkctl': '/usr/bin/networkctl',
     'ip': '/usr/sbin/ip', 'iw': '/usr/sbin/iw',
+    'wpa_cli': '/usr/sbin/wpa_cli',
 }
 
 
@@ -144,15 +145,23 @@ def public_state(test_id, token):
 def new_state():
     return {'test_id': secrets.token_hex(12), 'token': secrets.token_hex(24),
             'started': now(), 'deadline': now() + 180,
-            'phase': 'scheduled', 'confirmed': False, 'restored': False,
+            'phase': 'scheduled', 'mode': 'ap', 'confirmed': False, 'restored': False,
             'failure': None}
 
 
 def final_report(state):
     # Deliberately excludes AP password, SSID, token, MACs and original Wi-Fi values.
-    return {'version': VERSION, 'test_id': state['test_id'],
+    report = {'version': VERSION, 'test_id': state['test_id'],
             'phone_confirmed': bool(state.get('confirmed')),
             'restored': bool(state.get('restored')),
             'failure': state.get('failure'),
             'result': 'PASS' if state.get('confirmed') and state.get('restored')
                       and not state.get('failure') else 'NOT_PASSED'}
+    report['mode'] = state.get('mode', 'ap')
+    if report['mode'] == 'router':
+        for key in ('router_connected', 'candidate_saved', 'sources_unchanged', 'attempts', 'last_attempt', 'last_wpa_state'):
+            report[key] = state.get(key)
+        if not all(state.get(key) for key in ('router_connected', 'candidate_saved', 'sources_unchanged')):
+            report['result'] = 'NOT_PASSED'
+        report['persistent_wifi_changed'] = False
+    return report
