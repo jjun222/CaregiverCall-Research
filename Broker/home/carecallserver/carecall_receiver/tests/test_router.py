@@ -27,7 +27,7 @@ def request(ssid='IEEE', password='password', **values):
 class CredentialTests(unittest.TestCase):
     def test_known_wpa_psk_vector(self):
         candidate = router.credentials(request())
-        self.assertEqual(candidate['psk_hex'], 'f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e')
+        self.assertEqual(candidate['psk_hex'], 'f4*가림*e')
 
     def test_unicode_ssid_spaces_and_symbols_are_not_trimmed_or_injected(self):
         candidate = router.credentials(request(' 연구실 "Wi-Fi" ', ' !a"\\$()9 '))
@@ -101,8 +101,15 @@ class FlowTests(unittest.TestCase):
 
     def test_success_uses_only_candidate_unit_saves_private_candidate_and_stops(self):
         self.calls = []
+        self.state['regulatory_domain'] = 'GB'
+        c.save_state(self.state)
         candidate = router.credentials(request('PrivateRouter', 'Password!234'))
-        with mock.patch.object(c, 'command', side_effect=self.fake_command), \
+        observed_config = []
+        def command(*args, **kwargs):
+            if args == ('systemctl', 'start', router.UNIT):
+                observed_config.append((self.run / 'private' / 'candidate.conf').read_text())
+            return self.fake_command(*args, **kwargs)
+        with mock.patch.object(c, 'command', side_effect=command), \
              mock.patch.object(c, 'active', return_value=False), \
              mock.patch.object(router, 'candidate_ready', return_value='192.168.0.0/24'):
             result = router.attempt(candidate, lambda: False)
@@ -110,6 +117,9 @@ class FlowTests(unittest.TestCase):
         saved = self.etc / 'tested-router-candidate.json'
         self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
         self.assertEqual(json.loads(saved.read_text())['ssid'], 'PrivateRouter')
+        self.assertEqual(json.loads(saved.read_text())['regulatory_domain'], 'GB')
+        self.assertEqual(len(observed_config), 1)
+        self.assertIn('\ncountry=GB\nnetwork={', observed_config[0])
         self.assertNotIn('Password!234', saved.read_text())
         self.assertFalse((self.run / 'private' / 'candidate.conf').exists())
         self.assertIn(('systemctl', 'start', router.UNIT), self.calls)
@@ -126,6 +136,23 @@ class FlowTests(unittest.TestCase):
         self.assertFalse((self.etc / 'tested-router-candidate.json').exists())
         self.assertFalse(c.read_state()['router_connected'])
         self.assertIn(('systemctl', 'stop', router.UNIT), self.calls)
+
+    def test_unreadable_control_state_is_reported_separately_from_connect_timeout(self):
+        self.calls = []
+        def unreadable(state):
+            state.update(last_control_result='QUERY_FAILED', last_wpa_state='UNAVAILABLE',
+                         last_readiness='CONTROL_UNAVAILABLE')
+            return None
+        with mock.patch.object(c, 'command', side_effect=self.fake_command), \
+             mock.patch.object(c, 'active', side_effect=[False, True, False]), \
+             mock.patch.object(router, 'candidate_ready', side_effect=unreadable), \
+             mock.patch.object(c, 'now', side_effect=[100, 101, 200]), \
+             mock.patch.object(router.time, 'sleep'):
+            result = router.attempt(router.credentials(request()), lambda: False)
+        self.assertEqual(result, 'CONTROL_STATUS_UNAVAILABLE')
+        self.assertEqual(c.read_state()['last_control_result'], 'QUERY_FAILED')
+        self.assertFalse(c.read_state()['candidate_saved'])
+        self.assertFalse((self.etc / 'tested-router-candidate.json').exists())
 
     def test_subnet_conflict_returns_specific_result_without_saving(self):
         self.calls = []
