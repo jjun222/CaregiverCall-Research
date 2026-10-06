@@ -35,7 +35,7 @@ GUARD_UNIT = 'carecall-wifi-lan-recover.service'
 DROPIN_NAME = '60-carecall-lan.conf'
 DROPIN_TEXT = '# CareCall LAN updater 20261001\n[Service]\nReadWritePaths=/etc/ufw\n'
 VERSION = '20261001-lan-1'
-ORIGINAL = '*가림*'
+ORIGINAL = '192.168.0.0/24'
 MODULES = ('manager', 'web', 'router', 'transaction', 'firewall', 'firewall_base', 'common')
 
 
