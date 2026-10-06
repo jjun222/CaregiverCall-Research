@@ -23,13 +23,13 @@ from receiver_config import (
 )
 
 
-TOPIC = "*가림*"
+TOPIC = "carecall/v1/devices/button01/call"
 
 VALID_PAYLOAD = (
     b'{"schema_version":1,'
-    b'"event_id":"*가린*",'
-    b'"device_id":"*가림*",'
-    b'"event_type":"*가림*",'
+    b'"event_id":"button01-test-00000001",'
+    b'"device_id":"button01",'
+    b'"event_type":"care_call",'
     b'"sequence":1,'
     b'"uptime_ms":57510}'
 )
