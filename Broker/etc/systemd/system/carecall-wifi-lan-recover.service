@@ -1,0 +1,14 @@
+[Unit]
+Description=Recover an interrupted CareCall LAN update
+After=local-fs.target ufw.service
+Before=carecall-wifi-manager.service
+ConditionPathExists=/opt/carecall-wifi-lan-update-20261001/pending
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I -B /opt/carecall-wifi-lan-update-20261001/apply_patch.py recover-boot
+TimeoutStartSec=180s
+UMask=0077
+StandardOutput=journal
+StandardError=null
+[Install]
+WantedBy=multi-user.target
