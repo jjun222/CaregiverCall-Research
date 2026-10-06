@@ -8,11 +8,11 @@ import os
 from pathlib import Path
 
 
-MQTT_BROKER_HOST = "*가림*"
+MQTT_BROKER_HOST = "127.0.0.1"
 MQTT_BROKER_PORT = 1883
-MQTT_USERNAME = "*가림*"
-MQTT_CLIENT_ID = "*가림*"
-MQTT_TOPIC_FILTER = "*가림*"
+MQTT_USERNAME = "carecall_receiver"
+MQTT_CLIENT_ID = "carecall-python-receiver"
+MQTT_TOPIC_FILTER = "carecall/v1/devices/+/call"
 MQTT_QOS = 1
 MQTT_KEEPALIVE_SECONDS = 60
 
