@@ -16,12 +16,12 @@ up = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(up)
 
 
-def address(ip='*가림*', prefix=24):
+def address(ip='192.168.0.7', prefix=24):
     return [{'ifname': 'wlan0', 'addr_info': [
         {'family': 'inet', 'scope': 'global', 'local': ip, 'prefixlen': prefix}]}]
 
 
-def route(gateway='*가림*', dev='wlan0'):
+def route(gateway='192.168.0.1', dev='wlan0'):
     return [{'dst': 'default', 'dev': dev, 'gateway': gateway, 'protocol': 'dhcp', 'metric': 600}]
 
 
