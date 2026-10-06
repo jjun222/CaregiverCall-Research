@@ -16,10 +16,10 @@ UFW = '/usr/sbin/ufw'
 BASELINE = Path(__file__).with_name('reviewed_firewall.json')
 # Rule order is part of the reviewed configuration. All rules are IPv4/wlan0.
 RULES = (
-    ('tcp', '*가림*', None, '*가림*', '8080', 'CareCall AP trial web'),
-    ('udp', '*가림*', '68', '*가림*', '67', 'CareCall AP trial DHCP initial'),
-    ('udp', '*가림*', '68', '*가림*', '67', 'CareCall AP trial DHCP broadcast'),
-    ('udp', '*가림*', '68', '*가림*', '67', 'CareCall AP trial DHCP unicast'),
+    ('tcp', '192.168.77.0/24', None, '192.168.77.1', '8080', 'CareCall AP trial web'),
+    ('udp', '0.0.0.0/32', '68', '255.255.255.255', '67', 'CareCall AP trial DHCP initial'),
+    ('udp', '192.168.77.0/24', '68', '255.255.255.255', '67', 'CareCall AP trial DHCP broadcast'),
+    ('udp', '192.168.77.0/24', '68', '192.168.77.1', '67', 'CareCall AP trial DHCP unicast'),
 )
 
 
