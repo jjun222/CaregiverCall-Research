@@ -7,12 +7,12 @@ from message_validator import (
 )
 
 
-VALID_TOPIC = "*가림*"
+VALID_TOPIC = "carecall/v1/devices/button01/call"
 
 VALID_DOCUMENT = {
     "schema_version": 1,
-    "event_id": "*가림*",
-    "device_id": "*가림*",
+    "event_id": "button01-5700fd46b710e354-00000001",
+    "device_id": "button01",
     "event_type": "care_call",
     "sequence": 1,
     "uptime_ms": 57510,
@@ -259,7 +259,7 @@ class ValidateCallMessageTests(unittest.TestCase):
     def test_rejects_non_finite_json_number(self) -> None:
         payload = (
             b'{"schema_version":1,"event_id":"event-1",'
-            b'"device_id":"*가림*",'
+            b'"device_id":"button01",'
             b'"event_type":"care_call",'
             b'"sequence":1,"uptime_ms":NaN}'
         )
