@@ -1,0 +1,19 @@
+{
+  "version": "20260929-persist-1",
+  "app": {
+    "firewall.py": "d7b7ce4735c6631c11614fa8077ef4fd5cfd5f6a36dadcdf6850f096188c2d84",
+    "web.py": "1db43ea375828c7e68e7883460187e74277bd4614215cdd0243b7725980dba08",
+    "manager.py": "e8cc4b9dce96b8eeed95b143aa938ed0eef3a9834eb187ff728438695c63d71c",
+    "router.py": "96bb7a9b63d736912db9101a6bef12ff8c571296b244e14bab9a1f863f2524d3",
+    "common.py": "f407e84aa1f5d94239a7d2db45a0df2831b4dcdbd476c6ec89f619e98e0814de",
+    "transaction.py": "e9caa0311412e2e284ae709ef0075cccfe1c60f1c0d9b64de2e40f1bc8d3f90c",
+    "reviewed_firewall.json": "2e0c20f40230b9710e685a569af404a76a701934c8bddfefa4be91b0c970fb91"
+  },
+  "units": {
+    "carecall-wifi-manager.service": "075a5d4283fdd578ddff522889fb66c0604c4e45f5031ba0aee58bdb78c53330",
+    "carecall-wifi-manager-hostapd.service": "b6254f5fd8c304c403c3d93f1919671a5bcba9d3399cac7842c7730cf0009cce",
+    "carecall-wifi-manager-dhcp.service": "855e6a9b6594a2239b70e91a47760f3c8e59c4727daad3248fe2840a64589e9b",
+    "carecall-wifi-manager-web.service": "8bf812072d8e15f1b03e496601204e24cb28448620a43e7d49a0932df27b6250",
+    "carecall-wifi-manager-router.service": "cecc2180d86ac0913ffa20f1713eb35713200c6e9d38ab604496a15365c5649f"
+  }
+}
