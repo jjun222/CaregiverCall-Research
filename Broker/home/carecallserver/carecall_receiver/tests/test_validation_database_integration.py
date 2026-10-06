@@ -17,15 +17,15 @@ class ValidationDatabaseIntegrationTests(
         self,
     ) -> None:
         topic = (
-            "*가림*"
+            "carecall/v1/devices/button01/call"
         )
 
         payload = (
             b'{"schema_version":1,'
             b'"event_id":'
-            b'"*가림*",'
-            b'"device_id":"*가림*",'
-            b'"event_type":"*가림*",'
+            b'"button01-5700fd46b710e354-00000001",'
+            b'"device_id":"button01",'
+            b'"event_type":"care_call",'
             b'"sequence":1,'
             b'"uptime_ms":57510}'
         )
