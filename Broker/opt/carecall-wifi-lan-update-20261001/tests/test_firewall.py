@@ -13,38 +13,38 @@ from support import c, fw, address, route, raw, FakeUFW
 class SelectionTests(unittest.TestCase):
     def test_selects_connected_private_lan_from_actual_prefix(self):
         for ip, prefix, gateway, expected in (
-            ('*가림*', 24, '*가림*', '*가림*'),
-            ('*가림*', 24, '*가림*', '*가림*'),
-            ('*가림*', 23, '*가림*', '*가림*'),
-            ('*가림*', 28, '*가림*', '*가림*')):
+            ('192.168.0.7', 24, '192.168.0.1', '192.168.0.0/24'),
+            ('192.168.50.17', 24, '192.168.50.1', '192.168.50.0/24'),
+            ('10.20.31.12', 23, '10.20.30.1', '10.20.30.0/23'),
+            ('172.20.10.9', 28, '172.20.10.1', '172.20.10.0/28')):
             with self.subTest(ip=ip):
                 self.assertEqual(fw.select_network(address(ip, prefix), route(gateway)), expected)
 
     def test_rejects_public_cgnat_link_local_reserved_overlap(self):
         for ip, prefix, gateway in (
-            ('*가림*', 24, '*가림*'), ('*가림*', 24, '*가림*'),
-            ('*가림*', 24, '*가림*'), ('*가림*', 24, '*가림*'),
-            ('*가림*', 24, '*가림*'), ('*가림*', 16, '*가림*')):
+            ('8.8.8.10', 24, '8.8.8.1'), ('100.64.0.10', 24, '100.64.0.1'),
+            ('169.254.1.10', 24, '169.254.1.1'), ('192.168.77.10', 24, '192.168.77.1'),
+            ('192.168.78.10', 24, '192.168.78.1'), ('192.168.0.10', 16, '192.168.0.1')):
             with self.subTest(ip=ip), self.assertRaises(c.TrialError):
                 fw.select_network(address(ip, prefix), route(gateway))
 
     def test_rejects_missing_wrong_interface_and_invalid_gateway(self):
-        for routes in ([], route(dev='eth0'), route('*가림*'), route('*가림*'),
-                       route('*가림*'), route('*가림*')):
+        for routes in ([], route(dev='eth0'), route('192.168.1.1'), route('192.168.0.7'),
+                       route('192.168.0.0'), route('192.168.0.255')):
             with self.subTest(routes=routes), self.assertRaises(c.TrialError):
                 fw.select_network(address(), routes)
 
     def test_ignores_eth0_default_in_unfiltered_route_json(self):
-        self.assertEqual(fw.select_network(address(), route('*가림*', 'eth0') + route()), fw.ORIGINAL)
+        self.assertEqual(fw.select_network(address(), route('10.1.0.1', 'eth0') + route()), fw.ORIGINAL)
 
     def test_rejects_ambiguous_multiple_subnets(self):
         addresses = address()
-        addresses[0]['addr_info'] += address('*가림*')[0]['addr_info']
+        addresses[0]['addr_info'] += address('10.10.10.7')[0]['addr_info']
         with self.assertRaisesRegex(c.TrialError, 'AMBIGUOUS'):
             fw.select_network(addresses, route() + route('10.10.10.1'))
 
     def test_invalid_state_subnets(self):
-        for net in ('*가림*', '::/0', '0.0.0.0/0', '*가림*', '*가림*'):
+        for net in ('192.168.0.1/24', '::/0', '0.0.0.0/0', '10.0.0.0/31', '172.32.0.0/24'):
             with self.subTest(net=net), self.assertRaises(c.TrialError):
                 fw.validate_network(net)
 
