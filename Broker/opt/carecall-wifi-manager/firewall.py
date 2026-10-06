@@ -15,10 +15,10 @@ import time
 import common as c
 import firewall_base as base
 
-ORIGINAL = '*가림*'
+ORIGINAL = '192.168.0.0/24'
 PORTS = ('22', '1883')
-PRIVATE = tuple(ipaddress.ip_network(n) for n in ('*가림*', '*가림*', '*가림*'))
-RESERVED = tuple(ipaddress.ip_network(n) for n in ('*가림*', '*가림*'))
+PRIVATE = tuple(ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+RESERVED = tuple(ipaddress.ip_network(n) for n in ('192.168.77.0/24', '192.168.78.0/24'))
 _cached_network = None
 _cached_until = 0
 
