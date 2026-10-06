@@ -12,7 +12,7 @@ from event_database import (
 from message_validator import validate_call_message
 
 
-TOPIC = "*가림*"
+TOPIC = "carecall/v1/devices/button01/call"
 
 
 def make_call(
