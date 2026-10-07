@@ -1,0 +1,17 @@
+{
+  "registry_unit_tests": {
+    "passed": 12,
+    "failed": 0
+  },
+  "temporary_database_installation": "PASS",
+  "backup_and_permissions": "PASS",
+  "repeat_installation": "PASS",
+  "changed_baseline_rejected": "PASS",
+  "legacy_call_storage_duplicates_notification_confirmation": "PASS",
+  "root_account_rejection": "PASS",
+  "test_limitations": [
+    "Installer integration used a temporary DB and mocked only the OS project-owner check because this runner cannot switch uid. Root rejection was tested separately.",
+    "No real Pi services, MQTT broker, Telegram HTTP requests, or ESP32 hardware were exercised.",
+    "20 devices were registered in a test DB; this is not a 20-device radio/network capacity test."
+  ]
+}
