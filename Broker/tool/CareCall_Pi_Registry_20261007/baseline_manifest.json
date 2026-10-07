@@ -1,0 +1,29 @@
+{
+  "source": "CareCall_Pi_Source_20261006_124841/receiver",
+  "files": {
+    "configure_telegram.py": "4eab3971cb48088d3723fc1316833a11587683d37b0be9cd7e7a758959c9b62d",
+    "confirmation_delivery.py": "bea1c996f71001ec4627e870308b52b0990b07490fb182f7d5c1a1a539adaee7",
+    "confirmation_store.py": "a58f821146fbca7c9b071e12c7b350c6523ed73c83cbb304757a2d8463977233",
+    "delivery_gate.py": "f2e9f3161a414890e4aa47b1fe1357deb61cf934619f7f0fc051d1983d4df74c",
+    "event_database.py": "654b86ae057689714414165e81f7ea1763701f328c04b97d69db3ccf15f097c9",
+    "guardian_admin.py": "f1a93cc7b9ca5b0f182c3364ee08ce93724ddc3d6a1fed80764bea15f625e910",
+    "guardian_store.py": "9163b33c5c364d887c530604f038e11f8f5f74809647c3f937a40684de7e49c2",
+    "message_validator.py": "de5e2ed3cdaadaaefd2403d36be47737a368b24550770e2d3a9f3f7b3a0a68bd",
+    "mqtt_receiver.py": "8034544461d28403af9de12bf2599360ff113022ba1fddd8293fbc79bceefd94",
+    "notification_store.py": "d10ff1216fa25668d051e920c92dccf4b11af99cc700ef45f030dcaa9fa66186",
+    "operator_admin.py": "1625067aed3533f5f0c19821773dd69eb0e9b28af6d7aa7b9c91fa72737afe88",
+    "operator_handover.py": "17db43c1ac538bcf1a81f7ef959b9f5cc0b7de73ca07de81890358d6049ee031",
+    "operator_store.py": "68f9669eed89e01f6a668c895e05ecb2d4975aabcdc753a570b598afde008686",
+    "receiver_config.py": "20b5e7d702b0ed201333985ce66b9978efab06fb9bd1293a2d30636417c74240",
+    "requirements.txt": "86373a1cba103ebb9c560f2d18bcf42559f01c9341edee7add4302dcdeb15e09",
+    "telegram_api.py": "7bda6eeb27feda98faa3e64f744f963fe289b00e0a87bf69431adf24bbc62b02",
+    "telegram_registration.py": "662cd9274d10503573c80ffb40b4637bdd8e7be94dbeafe06ca34046879a096b",
+    "telegram_status.py": "92961bb7f72483590edc0c5240439b738409f394ac22ace0bd429e8b4f3478cb",
+    "telegram_worker.py": "bf1c8978438e863bfc109749faa96bcd87f3380694dbd3874446120975726935",
+    "tests/test_event_database.py": "069af0a3096d7cf2b0fb6f86cf84ecd73efdeba86c4b33dd434fea47a908d3d9",
+    "tests/test_message_validator.py": "402a61df49f97259e43004bbcf6abfa858f8c129ec3166e9afc7c02e57273c79",
+    "tests/test_mqtt_receiver.py": "24e1962bfeef41d3a7b8ecacb11985a98ecd14daa9881ff44f23a3e95ae66577",
+    "tests/test_receiver_config.py": "ff6d395b1d0cc7ebd544f2628750f8f23aaed9e405f153da408de0e5cd150868",
+    "tests/test_validation_database_integration.py": "3ad4e70dca73e5f2791cf3ca5f96ec902805477c089e7573be586cece53add52"
+  }
+}
