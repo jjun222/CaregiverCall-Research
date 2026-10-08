@@ -4,6 +4,7 @@
 Run without --prepare to check the source only. Run from a real console for
 hidden password entry. Requires only Python's standard library.
 Generated sdkconfig contains plaintext credentials; keep it private.
+Password reuse is allowed; matching confirmation and format checks remain.
 """
 import argparse
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ import stat
 import sys
 import warnings
 
-VERSION = "20261007-button02-prepare-1"
+VERSION = "20261008-button02-prepare-2"
 DEFAULT_SOURCE = Path(r"C:\Users\dsc-nb02\Carecall_main_file\carecall_esp32_wifi_setup")
 MARKER = "carecall_button02_profile.json"
 EXPECTED = {
@@ -173,7 +174,7 @@ def source_info(source):
     return source, raw, values, stage, selected, hashes
 
 
-def new_password(label, forbidden):
+def new_password(label):
     require(sys.stdin.isatty(), "REAL_CONSOLE_REQUIRED_FOR_HIDDEN_INPUT")
     with warnings.catch_warnings():
         warnings.simplefilter("error", getpass.GetPassWarning)
@@ -182,11 +183,13 @@ def new_password(label, forbidden):
     require(first == second, "PASSWORD_CONFIRMATION_MISMATCH")
     require(re.fullmatch(r"[A-Za-z0-9]{16,63}", first) is not None,
             "NEW_PASSWORD_MUST_BE_16_TO_63_ASCII_LETTERS_OR_DIGITS")
-    require(first not in forbidden, "PASSWORD_MUST_BE_DISTINCT")
     return first
 
 
 def replace_profile(raw, replacements):
+    require(set(replacements) == CHANGED_KEYS, "UNEXPECTED_PROFILE_KEYS")
+    require(all(replacements[key] == value for key, value in PROFILE.items()),
+            "BUTTON02_IDENTITY_REQUIRED")
     _, original = parse_config(raw)
     updated = raw
     for key, value in replacements.items():
@@ -196,7 +199,10 @@ def replace_profile(raw, replacements):
         require(count == 1, "CONFIG_REPLACEMENT_FAILED:" + key)
     _, changed = parse_config(updated)
     actual = {key for key in original.keys() | changed.keys() if original.get(key) != changed.get(key)}
-    require(actual == CHANGED_KEYS, "UNEXPECTED_CONFIG_DIFFERENCE")
+    # Identity must change; either password may retain its original value.
+    require(set(PROFILE) <= actual <= CHANGED_KEYS, "UNEXPECTED_CONFIG_DIFFERENCE")
+    for key, value in replacements.items():
+        require(string_value(changed, key) == value, "PROFILE_VALUE_MISMATCH:" + key)
     # All bytes outside these five value lines must be identical.
     reverted = updated
     for key in replacements:
@@ -214,17 +220,14 @@ def prepare(source, destination, password_reader=new_password):
     require(parent == source.parent and destination.name == "carecall_esp32_button02",
             "DESTINATION_MUST_BE_BUTTON02_SIBLING")
     require(not os.path.lexists(destination), "DESTINATION_ALREADY_EXISTS_NO_OVERWRITE")
-    old_mqtt = string_value(values, MQTT_KEY)
-    old_ap = string_value(values, AP_KEY)
-    forbidden = {old_mqtt, old_ap, string_value(values, "CONFIG_CARECALL_WIFI_PASSWORD")}
-    mqtt = password_reader("button02 MQTT password", forbidden)
-    ap = password_reader("button02 setup AP password", forbidden | {mqtt})
+    mqtt = password_reader("button02 MQTT password")
+    ap = password_reader("button02 setup AP password")
     require(all(isinstance(p, str) and re.fullmatch(r"[A-Za-z0-9]{16,63}", p) for p in (mqtt, ap)),
             "NEW_PASSWORD_FORMAT_INVALID")
-    require(mqtt not in forbidden and ap not in forbidden and mqtt != ap,
-            "PASSWORD_MUST_BE_DISTINCT")
     replacements = {**PROFILE, MQTT_KEY: mqtt, AP_KEY: ap}
     updated = replace_profile(raw, replacements)
+    new_values = parse_config(updated)[1]
+    actual_changed_keys = sorted(key for key in CHANGED_KEYS if values[key] != new_values[key])
     destination.mkdir(mode=0o700)  # Atomic refusal if someone created it meanwhile.
     try:
         for original in selected:
@@ -253,7 +256,9 @@ def prepare(source, destination, password_reader=new_password):
             "idf_root_hint": stage.get("idf_root"),
             "source_hashes": before,
             "profile_sdkconfig_sha256": digest(config),
-            "changed_config_keys": sorted(CHANGED_KEYS),
+            "configured_config_keys": sorted(CHANGED_KEYS),
+            "changed_config_keys": actual_changed_keys,
+            "password_reuse_allowed": True,
             "hardware_identity_verified": False,
             "build_verified": False,
             "pi_registered": False,
@@ -272,7 +277,8 @@ def prepare(source, destination, password_reader=new_password):
     print("BUTTON02_DEVICE_ID=button02")
     print("BUTTON02_MQTT_USERNAME=button02")
     print("BUTTON02_MQTT_CLIENT_ID=carecall-button02")
-    print("CHANGED_CONFIG_KEYS=5")
+    print("CONFIGURED_CONFIG_KEYS=5")
+    print("CHANGED_CONFIG_KEYS=" + str(len(actual_changed_keys)))
     print("COMMON_SOURCE_COPY_VERIFIED=YES")
     print("OTHER_CONFIG_BYTES_PRESERVED=YES")
     print("OLD_BUILD_OUTPUTS_COPIED=NO")
@@ -288,6 +294,8 @@ def main():
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--prepare", action="store_true", help="Create sibling button02 project")
     args = parser.parse_args()
+    print("TOOL_VERSION=" + VERSION)
+    print("PASSWORD_REUSE_ALLOWED=YES")
     try:
         if args.prepare:
             prepare(args.source, args.source.parent / "carecall_esp32_button02")
