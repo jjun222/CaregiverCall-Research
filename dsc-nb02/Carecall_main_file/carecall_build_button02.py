@@ -11,7 +11,7 @@ import stat
 import subprocess
 import sys
 
-VERSION = "20261008-button02-build-1"
+VERSION = "20261008-button02-build-2"
 PREPARE_VERSION = "20261008-button02-prepare-2"
 DEFAULT_PROJECT = Path(r"C:\Users\dsc-nb02\Carecall_main_file\carecall_esp32_button02")
 EXPECTED_IDF = Path(r"C:\esp541\.espressif\v5.4.1\esp-idf")
@@ -56,7 +56,10 @@ def digest(path):
 
 
 def no_link(path):
-    info = path.lstat()
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        raise Stop("REQUIRED_PATH_MISSING:" + str(path)) from None
     require(not stat.S_ISLNK(info.st_mode) and not (
         getattr(info, "st_file_attributes", 0) & 0x400
     ), "LINK_OR_REPARSE_POINT_REFUSED")
@@ -163,6 +166,7 @@ def validate_inputs(project):
         require(path.is_file() and digest(path) == wanted, "BUTTON02_SOURCE_DIFF:" + name)
 
     config = project / "sdkconfig"
+    no_link(config)
     require(digest(config) == record.get("profile_sdkconfig_sha256"),
             "BUTTON02_SDKCONFIG_CHANGED")
     values = parse_sdk(config)
@@ -207,10 +211,6 @@ def validate_inputs(project):
             "IDF_ROOT_HINT_MISMATCH")
     require((idf / "tools/idf.py").is_file() and (idf / "tools/idf_tools.py").is_file(),
             "ESP_IDF_TOOLS_MISSING")
-    version_file = idf / "version.txt"
-    no_link(version_file)
-    require(version_file.read_text(encoding="utf-8-sig").strip() == "5.4.1",
-            "ESP_IDF_5_4_1_REQUIRED")
     return project, record, expected, values, source, idf
 
 
@@ -259,6 +259,20 @@ def exported_environment(project, idf, secrets):
             key = "PATH"
         environment[key] = value
     return environment
+
+
+def verify_idf_version(project, idf, environment, secrets):
+    result = subprocess.run(
+        [sys.executable, str(idf / "tools/idf.py"), "--version"],
+        cwd=project, env=environment, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    output = result.stdout + "\n" + result.stderr
+    if result.returncode:
+        print_sanitized_tail(output, secrets)
+        raise Stop("ESP_IDF_VERSION_COMMAND_FAILED")
+    match = re.search(r"(?:ESP-IDF\s+)?v?(5\.4\.1)(?:[-+\s]|$)", output)
+    require(match is not None, "ESP_IDF_5_4_1_REQUIRED")
 
 
 def print_sanitized_tail(output, secrets):
@@ -414,6 +428,7 @@ def build(project):
         owner.write_text(str(project.resolve()), encoding="utf-8")
     secrets = [sdk_value(values, key) for key in PRIVATE_KEYS]
     environment = exported_environment(project, idf, secrets)
+    verify_idf_version(project, idf, environment, secrets)
     print("BUTTON02_BUILD=STARTING", flush=True)
     process = subprocess.run(
         [sys.executable, str(idf / "tools/idf.py"), "-C", str(project),
@@ -437,7 +452,12 @@ def main():
         build(args.project)
         return 0
     except (Exception, KeyboardInterrupt) as error:
-        code = str(error) if isinstance(error, Stop) else type(error).__name__
+        if isinstance(error, Stop):
+            code = str(error)
+        elif isinstance(error, FileNotFoundError):
+            code = "REQUIRED_PATH_MISSING:" + str(error.filename or "UNKNOWN")
+        else:
+            code = type(error).__name__
         print("BUTTON02_BUILD_VERIFY=FAILED")
         print("ERROR_CODE=" + code)
         print("DO_NOT_FLASH_UNVERIFIED_BUILD=YES")
